@@ -1,0 +1,52 @@
+# Python bytecode / caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Build / packaging artefacts
+build/
+dist/
+*.egg
+
+# Local DB / storage from dev runs
+storage/
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# IDE / OS junk
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Tests / fixtures we don't ship
+tests/
+htmlcov/
+.coverage
+.coverage.*
+
+# Local secrets / dotfiles
+.env
+.env.*
+!.env.example
+
+# Smoke / scratch files
+_smoke_*.py

@@ -1,0 +1,86 @@
+# Production overlay. Apply on top of docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Differences vs dev:
+#   * No host-exposed Postgres / Redis ports.
+#   * No source bind-mounts — image is the source of truth.
+#   * Backend / worker run gunicorn-style (uvicorn workers, no --reload).
+#   * Frontend is built into nginx instead of running vite dev server.
+#   * Resource limits and read-only root filesystems where it's safe.
+
+services:
+  postgres:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  backend:
+    image: nexus-ai/backend:prod
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    volumes:
+      # Drop the source bind-mount; keep only the writable storage volume.
+      - backend_storage:/app/storage
+    command:
+      - uvicorn
+      - main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "${BACKEND_WORKERS:-3}"
+      - --proxy-headers
+      - --forwarded-allow-ips=*
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1536M
+        reservations:
+          memory: 512M
+
+  worker:
+    image: nexus-ai/backend:prod
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    volumes:
+      - backend_storage:/app/storage
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2048M
+        reservations:
+          memory: 768M
+
+  frontend:
+    # Override dev container with the nginx production image.
+    image: nexus-ai/frontend:prod
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: nexus-frontend
+    restart: unless-stopped
+    command: !reset null
+    working_dir: !reset null
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    volumes: !reset []
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [internal]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M

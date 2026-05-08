@@ -1,0 +1,29 @@
+node_modules/
+dist/
+build/
+.vite/
+.cache/
+.parcel-cache/
+
+# Logs / coverage
+*.log
+logs/
+coverage/
+.nyc_output/
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+# IDE / OS junk
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Tests we don't ship to the image
+tests/
+e2e/
+playwright-report/
+test-results/
