@@ -1,7 +1,10 @@
 # ── env / secrets ─────────
-.env
-.env.local
-.env.*.local
+# NOTE: .env is intentionally tracked while this repo is PRIVATE so the dev
+# can clone & run on multiple laptops. If you ever flip this repo to PUBLIC,
+# remove .env from tracking, rotate every key, and uncomment the lines below.
+# .env
+# .env.local
+# .env.*.local
 *.pem
 *.key
 
