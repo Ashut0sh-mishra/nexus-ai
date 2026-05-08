@@ -2,13 +2,14 @@
 
 Production-grade AI slide generator — same stack as Manus AI.
 
-- **Frontend** — React 18 + Vite + Tailwind (Manus-style dark UI)
+- **Frontend** — React 18 + Vite + Tailwind, central design system, 23-layout slide renderer
 - **Backend** — FastAPI + Celery + PostgreSQL + Redis
-- **AI** — Claude `claude-sonnet-4-6` (prod) / `claude-opus-4-7` (dev)
-- **Search** — Tavily (primary) + Serper (fallback)
+- **AI** — multi-provider chain (OpenRouter → NVIDIA NIM → Gemini → Groq → Anthropic → OpenAI), free tiers first
+- **Search** — Tavily (primary) + Serper (fallback) — optional
 - **Browser** — `browser-use` + Playwright (CodeAct sandbox)
 - **Storage** — Cloudflare R2 (with local fallback)
 - **Auth** — JWT + Google OAuth
+- **Layouts** — single source of truth in [`frontend/src/design/layouts.registry.json`](frontend/src/design/layouts.registry.json), shared by frontend renderer, backend planner, and PPTX exporter; CI fails on drift
 
 ---
 
@@ -22,13 +23,18 @@ cd nexus
 cp .env.example .env
 ```
 
-Edit `.env` and fill in at minimum:
+Edit `.env` and fill in **at least one** AI provider key (free tiers first):
 
-| key | required | where |
+| key | tier | where |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | ✅ yes | console.anthropic.com/settings/keys |
-| `SECRET_KEY` | ✅ yes | `python -c "import secrets; print(secrets.token_hex(32))"` |
-| `TAVILY_API_KEY` | optional | app.tavily.com (research step is skipped without it) |
+| `OPENROUTER_API_KEY` | free | <https://openrouter.ai/keys> (Kimi K2) |
+| `GEMINI_API_KEY` | free 1000/day | <https://aistudio.google.com/apikey> |
+| `GROQ_API_KEY` | free | <https://console.groq.com/keys> |
+| `NVIDIA_NIM_API_KEY` | free | <https://build.nvidia.com> |
+| `ANTHROPIC_API_KEY` | paid fallback | <https://console.anthropic.com/settings/keys> |
+| `OPENAI_API_KEY` | paid fallback | <https://platform.openai.com/api-keys> |
+| `JWT_SECRET` | required | `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `TAVILY_API_KEY` | optional | <https://app.tavily.com> (research step is skipped without it) |
 | everything else | optional | only needed for production deploys |
 
 ### 2. One-command boot (Docker)
@@ -105,9 +111,21 @@ npm run dev
 
 Each step pushes an SSE event with progress `%` and message.
 
-### Slide layouts (6)
+### Slide layouts (23 canonical)
 
-`title`, `bullets`, `two-col`, `quote`, `stats`, `closing`.
+`title`, `section`, `bullets`, `two-col`, `comparison`, `kpi`, `quote`, `stats`, `chart`, `table`, `timeline`, `image-focus`, `closing`, `hero`, `bento`, `agenda`, `roadmap`, `metric-spotlight`, `process`, `pyramid`, `matrix-2x2`, `feature-grid`, `callout`.
+
+40+ aliases (e.g. `kpis` → `kpi`, `vs` → `comparison`, `cards` → `bento`) are defined in `frontend/src/design/layouts.registry.json`. Backend planner and frontend renderer share the file. CI script `node scripts/verify-layouts.mjs` fails the build if backend/frontend/exporter drift apart.
+
+### Quality gates
+
+```bash
+cd frontend
+npm run verify:layouts   # backend/frontend layout parity (fast, no browser)
+npm run build            # production build
+npm run test:gallery     # Playwright: 23 per-layout snapshots + zero-warning + alias coverage
+npm run test:ci          # all of the above
+```
 
 ### API
 
