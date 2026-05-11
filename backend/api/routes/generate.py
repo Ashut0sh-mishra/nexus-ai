@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
-import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent.art_direction import infer_art_direction
+from config import settings
 from database.connection import get_db
 from database.models import Task
 
@@ -18,80 +19,18 @@ logger = logging.getLogger("nexus.api.generate")
 router = APIRouter()
 
 
-# ── topic sanitization ───────────────────────────────────────────────────
-# Phrases users tend to prepend to their actual topic. Stripping these gives
-# Wikipedia/Wikidata a clean noun-phrase topic and keeps the title slide from
-# saying "Generate Ppt On Ai And Brain Uses".
-_INSTRUCTION_PREFIX_RE = re.compile(
-    r"""^\s*(?:please\s+)?(?:can\s+you\s+)?(?:could\s+you\s+)?(?:i\s+(?:want|need)\s+(?:you\s+to\s+)?)?
-        (?:make|create|generate|build|design|produce|prepare|give\s+me|do)
-        \s+(?:me\s+|us\s+)?
-        (?:an?\s+|the\s+)?
-        (?:slide\s+deck|deck|slides?|presentation|ppt|pptx|powerpoint|pitch|report)
-        \s+(?:on|about|for|covering|regarding|titled|called|of|over|around)\s+
-    """,
-    re.I | re.X,
-)
-_TRAILING_INSTRUCTION_RE = re.compile(
-    r"""\s+(?:please|asap|now|in\s+\d+\s+slides?|with\s+\d+\s+slides?|"""
-    r"""for\s+(?:my|our|the)\s+(?:presentation|talk|class|meeting))\s*\.?\s*$""",
-    re.I | re.X,
-)
-
-
-def _sanitize_topic(raw: str, max_len: int = 200) -> str:
-    """Turn a free-form user prompt into a clean topic noun-phrase."""
-    if not raw:
-        return raw
-    t = raw.strip().strip("\"'`")
-    # Repeatedly strip leading instruction phrases (e.g. "please make a deck about ai uses")
-    for _ in range(3):
-        new = _INSTRUCTION_PREFIX_RE.sub("", t).strip()
-        if new == t:
-            break
-        t = new
-    t = _TRAILING_INSTRUCTION_RE.sub("", t).strip(" .,:;-")
-    # Trim trailing punctuation/quotes left over.
-    t = t.strip("\"'`")
-    if not t:
-        return raw.strip()  # never return empty; fall back to original
-    # Title-case ALL CAPS or all lowercase prompts so the title slide looks good,
-    # but preserve short acronyms / numeric tokens (AI, USA, WW2, 5G).
-    _STOP = {"a", "an", "the", "and", "or", "of", "in", "on", "to", "for",
-             "by", "at", "vs", "with", "from", "as", "is", "it"}
-    if t.isupper() or (t.islower() and len(t.split()) >= 2):
-        words = t.split()
-        out_words: list[str] = []
-        for i, w in enumerate(words):
-            lw = w.lower()
-            if lw in _STOP and i > 0:
-                out_words.append(lw)
-            elif lw in _STOP:
-                # Leading stop word: title-case it instead of treating as acronym.
-                out_words.append(lw[:1].upper() + lw[1:])
-            elif len(w) <= 4 and any(c.isdigit() for c in w):
-                out_words.append(w.upper())
-            elif len(w) <= 3 and w.isalpha():
-                out_words.append(w.upper())
-            else:
-                out_words.append(w[:1].upper() + w[1:])
-        t = " ".join(out_words)
-    return t[:max_len]
-
-
 class GenerateRequest(BaseModel):
     topic: str = Field(..., min_length=4, max_length=2000)
     slide_count: int = Field(8, ge=4, le=20)
-    # "auto" lets the agent loop pick the most fitting theme for the topic.
-    theme: str = Field("auto", max_length=64)
+    theme: str = Field("Editorial", max_length=64)
     search_web: bool = True
     user_id: Optional[str] = None
-    # Optional context: file IDs from POST /api/upload that the agent should
-    # ground the deck in. Accepts both list[str] and JSON-array form.
-    file_ids: Optional[list[str]] = Field(default=None)
-    audience: Optional[str] = Field(default=None, max_length=64)
-    tone: Optional[str] = Field(default=None, max_length=64)
-    industry: Optional[str] = Field(default=None, max_length=64)
+    # Phase 6U: optional minimum number of unique sources the generator
+    # should harvest before plan/generate. ``0`` (default) preserves the
+    # pre-6U single-shot search behaviour. When positive, the loop calls
+    # :meth:`SearchService.harvest` and keeps gathering across follow-up
+    # queries until either the target is met or providers are exhausted.
+    min_sources: int = Field(0, ge=0, le=20)
 
     @field_validator("topic")
     @classmethod
@@ -102,22 +41,101 @@ class GenerateRequest(BaseModel):
 class GenerateResponse(BaseModel):
     task_id: str
     status: str
+    # Phase 6I: only populated when NEXUS_RUNTIME_DRIVES_GENERATE=true and
+    # the AgentRun dispatch trail was successfully persisted. Always None
+    # in default (flag-off) deployments — the live-eval adapter and
+    # frontend ignore unknown extra fields, but we keep the default-off
+    # contract identical to pre-6I.
+    agent_run_id: Optional[str] = None
+
+
+async def _record_runtime_dispatch(
+    db: AsyncSession,
+    *,
+    task_id: str,
+    user_id: Optional[str],
+    payload: "GenerateRequest",
+    trace_id: str,
+) -> Optional[str]:
+    """Phase 6I — persist an AgentRun + thought step for this generate call.
+
+    Returns the run id if persistence (or recorded-failure) succeeded.
+    Returns ``None`` only if the AgentRun row itself could not be created.
+    A persistence failure inside the run is captured by marking the run
+    ``failed`` rather than crashing the API. This function commits its own
+    transactions; the route must commit Task before calling it.
+    """
+    # Local imports keep the route cheap when the flag is off.
+    from agent.runtime import RuntimeConfig
+    from services.agent_run_service import append_step, create_run, finish_run
+
+    try:
+        run = await create_run(
+            db,
+            goal=payload.topic,
+            task_id=task_id,
+            user_id=user_id,
+            max_steps=RuntimeConfig().max_steps,
+            meta={
+                "phase": "6I",
+                "dispatch_only": True,
+                "theme": payload.theme,
+                "slide_count": payload.slide_count,
+                "search_web": payload.search_web,
+            },
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception(
+            "generate.runtime_dispatch.create_run_failed",
+            extra={"trace_id": trace_id, "task_id": task_id},
+        )
+        return None
+
+    try:
+        await append_step(
+            db,
+            run_id=run.id,
+            kind="thought",
+            input_json={
+                "dispatch": "celery",
+                "topic_preview": payload.topic[:200],
+                "slide_count": payload.slide_count,
+                "theme": payload.theme,
+                "search_web": payload.search_web,
+            },
+        )
+        await finish_run(db, run_id=run.id, status="done")
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.warning(
+            "generate.runtime_dispatch.step_or_finish_failed",
+            extra={"trace_id": trace_id, "task_id": task_id, "err": str(exc)},
+        )
+        try:
+            await finish_run(
+                db,
+                run_id=run.id,
+                status="failed",
+                error=f"dispatch_record_failed: {exc}",
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception(
+                "generate.runtime_dispatch.finish_failed",
+                extra={"trace_id": trace_id, "task_id": task_id},
+            )
+    return run.id
 
 
 @router.post(
     "/generate",
     response_model=GenerateResponse,
+    response_model_exclude_none=True,
     status_code=202,
-    summary="Create a deck-generation task and enqueue it.",
-    description=(
-        "Persists a `Task`, optionally links uploaded files (`file_ids`), and "
-        "enqueues the agent loop on the Celery worker. Returns immediately "
-        "with `task_id` \u2014 subscribe to `/status/{task_id}` for live progress "
-        "or poll `/slides/{task_id}` once `status` reaches `done`."
-    ),
-    responses={
-        503: {"description": "Background queue (Redis/Celery) unavailable."},
-    },
 )
 async def create_generation_task(
     payload: GenerateRequest,
@@ -126,52 +144,63 @@ async def create_generation_task(
 ) -> GenerateResponse:
     """Create a task row and enqueue the Celery worker."""
     trace_id = getattr(request.state, "trace_id", "-")
-    # Strip instruction phrases ("generate ppt on X", "make a deck about X",
-    # "create slides for X") from the user prompt so research/Wikipedia and the
-    # title slide get a clean noun-phrase topic instead of an instruction.
-    clean_topic = _sanitize_topic(payload.topic)
+
+    # Phase 6M — topic-aware art direction. The Pydantic default for
+    # ``theme`` is ``"Editorial"``; only inputs that are ``""`` or
+    # ``"auto"`` (case-insensitive) are treated as auto. Any other value,
+    # including ``"Editorial"`` from older clients, is respected as an
+    # explicit user choice. ``infer_art_direction`` is deterministic and
+    # never raises.
+    art_direction = infer_art_direction(payload.topic, payload.theme)
+    effective_theme = art_direction.theme
+    logger.info(
+        "generate.art_direction",
+        extra={
+            "trace_id": trace_id,
+            "input_theme": payload.theme,
+            "effective_theme": effective_theme,
+            "category": art_direction.category,
+            "mood": art_direction.mood,
+            "rationale": art_direction.rationale,
+        },
+    )
+
     try:
         task = Task(
             user_id=payload.user_id,
-            topic=clean_topic,
+            topic=payload.topic,
             slide_count=payload.slide_count,
-            theme=payload.theme,
+            theme=effective_theme,
             search_web=payload.search_web,
             status="pending",
             current_step="queued",
             progress_pct=0.0,
-            context_sources=payload.file_ids or None,
-            audience=payload.audience,
-            tone=payload.tone,
-            industry=payload.industry,
         )
         db.add(task)
         await db.commit()
         await db.refresh(task)
-
-        # Link uploaded files to this task so the worker can pick them up
-        # via the UploadedFile.task_id == task_id query in the agent loop.
-        if payload.file_ids:
-            from database.models import UploadedFile
-
-            await db.execute(
-                UploadedFile.__table__.update()
-                .where(UploadedFile.id.in_(payload.file_ids))
-                .where(UploadedFile.task_id.is_(None))
-                .values(task_id=task.id)
-            )
-            await db.commit()
     except Exception as exc:
         await db.rollback()
         logger.exception("generate.create_task_failed", extra={"trace_id": trace_id})
         raise HTTPException(status_code=500, detail="Could not create task.") from exc
+
+    # Phase 6I — feature-flagged runtime dispatch trail. Default OFF.
+    agent_run_id: Optional[str] = None
+    if settings.NEXUS_RUNTIME_DRIVES_GENERATE:
+        agent_run_id = await _record_runtime_dispatch(
+            db,
+            task_id=task.id,
+            user_id=payload.user_id,
+            payload=payload,
+            trace_id=trace_id,
+        )
 
     # Enqueue async work. Import locally so the API process doesn't pull in
     # heavy worker-only deps (browser_use / playwright) on cold start.
     try:
         from workers.tasks import run_generation_task
 
-        run_generation_task.delay(task.id)
+        run_generation_task.delay(task.id, payload.min_sources)
     except Exception as exc:
         logger.warning(
             "generate.enqueue_failed_running_inline",
@@ -190,6 +219,13 @@ async def create_generation_task(
 
     logger.info(
         "generate.queued",
-        extra={"trace_id": trace_id, "task_id": task.id, "topic": payload.topic[:80]},
+        extra={
+            "trace_id": trace_id,
+            "task_id": task.id,
+            "topic": payload.topic[:80],
+            "agent_run_id": agent_run_id,
+        },
     )
-    return GenerateResponse(task_id=task.id, status="pending")
+    return GenerateResponse(
+        task_id=task.id, status="pending", agent_run_id=agent_run_id
+    )

@@ -1,12 +1,14 @@
-"""Canonical layout registry — loads the shared JSON spec.
+"""Canonical NEXUS slide layout registry — backend loader.
 
-The JSON file lives at `frontend/src/design/layouts.registry.json` so that
-both backend and frontend consume the same source of truth. If the file is
-missing (e.g. backend container built without the frontend tree), we fall
-back to the inline copy below — but `scripts/verify_layouts.mjs` will fail
-CI if the inline copy and the JSON drift.
+Single source of truth lives in ``frontend/src/design/layouts.registry.json``.
+Reading the same JSON keeps the backend normalizer
+(``backend/agent/loop.py``) and the frontend parser
+(``frontend/src/utils/slideParser.js``) from drifting.
 
-Edit only the JSON. Run `npm run verify:layouts` after any change.
+If the JSON is missing at runtime we fall back to a small in-process default
+so production never crashes on a packaging miss; the layout-coverage tests
+fail loudly when that default does not match the registry, so this only
+matters in degraded environments.
 """
 
 from __future__ import annotations
@@ -18,82 +20,94 @@ from typing import Any
 
 logger = logging.getLogger("nexus.agent.layouts_registry")
 
-# Resolution order — first hit wins.
-_CANDIDATE_PATHS = [
-    # Repo layout (dev): backend/agent/ → ../../frontend/src/design/...
-    Path(__file__).resolve().parents[2] / "frontend" / "src" / "design" / "layouts.registry.json",
-    # Container layout: assume frontend bundle is mounted alongside.
-    Path("/app/frontend/src/design/layouts.registry.json"),
+# The canonical registry file. A byte-identical copy lives at
+# ``frontend/src/design/layouts.registry.json``; the verify-layouts script
+# fails CI if the two ever drift. We read the backend-side copy here so the
+# backend container does not need access to the frontend tree.
+_REGISTRY_PATH = Path(__file__).resolve().parent / "layouts.registry.json"
+
+# Last-resort default kept in sync with layouts.registry.json. The
+# test ``test_backend_valid_layouts_matches_registry`` asserts these
+# match, so any drift fails CI.
+_DEFAULT_LAYOUTS: tuple[str, ...] = (
+    "title",
+    "bullets",
+    "two-col",
+    "quote",
+    "stats",
+    "chart",
+    "closing",
+)
+_DEFAULT_FALLBACK = "bullets"
+
+
+def _load_registry() -> dict[str, Any]:
+    try:
+        with _REGISTRY_PATH.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            raise ValueError("registry root is not an object")
+        return data
+    except FileNotFoundError:
+        logger.warning(
+            "layouts_registry.json_missing path=%s using default layouts",
+            _REGISTRY_PATH,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "layouts_registry.json_invalid path=%s err=%s using default layouts",
+            _REGISTRY_PATH,
+            exc,
+        )
+    return {
+        "layouts": [{"name": n, "exported": True} for n in _DEFAULT_LAYOUTS],
+        "aliases": {},
+        "fallback": _DEFAULT_FALLBACK,
+    }
+
+
+_RAW = _load_registry()
+
+_layout_entries: list[dict[str, Any]] = [
+    e for e in (_RAW.get("layouts") or []) if isinstance(e, dict) and e.get("name")
 ]
 
-# Inline fallback — keep in sync with the JSON. Verified by CI.
-_INLINE_FALLBACK: dict[str, Any] = {
-    "version": 1,
-    "layouts": [
-        {"name": n, "exported": e}
-        for n, e in [
-            ("title", True), ("section", True), ("bullets", True), ("two-col", True),
-            ("comparison", True), ("kpi", True), ("quote", True), ("stats", True),
-            ("chart", True), ("table", False), ("timeline", True), ("image-focus", False),
-            ("closing", True), ("hero", True), ("bento", True), ("agenda", True),
-            ("roadmap", True), ("metric-spotlight", True), ("process", True),
-            ("pyramid", True), ("matrix-2x2", True), ("feature-grid", True), ("callout", True),
-        ]
-    ],
-    "aliases": {
-        "chart_focus": "chart", "chart-focus": "chart",
-        "image_text": "image-focus", "image-text": "image-focus",
-        "kpi_grid": "kpi", "kpi-grid": "kpi", "kpis": "kpi",
-        "bullet_list": "bullets", "bullet-list": "bullets", "list": "bullets",
-        "versus": "comparison", "vs": "comparison",
-        "two_col": "two-col", "twocol": "two-col", "two-column": "two-col",
-        "grid": "bento", "cards": "bento", "bento-grid": "bento",
-        "icon-cards": "feature-grid",
-        "toc": "agenda", "table-of-contents": "agenda",
-        "timeline-horizontal": "roadmap", "journey": "roadmap",
-        "steps": "process", "workflow": "process", "flow": "process",
-        "hierarchy": "pyramid", "stack": "pyramid",
-        "quadrant": "matrix-2x2", "2x2": "matrix-2x2", "matrix": "matrix-2x2",
-        "features": "feature-grid", "feature_grid": "feature-grid",
-        "highlight": "callout",
-        "big-number": "metric-spotlight", "big_metric": "metric-spotlight",
-        "big_number": "metric-spotlight", "metric": "metric-spotlight",
-        "banner": "hero", "cover": "title",
-    },
-    "fallback": "bullets",
+CANONICAL_LAYOUTS: tuple[str, ...] = tuple(str(e["name"]) for e in _layout_entries)
+EXPORT_SUPPORTED: frozenset[str] = frozenset(
+    str(e["name"]) for e in _layout_entries if e.get("exported")
+)
+LAYOUT_ALIASES: dict[str, str] = {
+    str(k).strip().lower(): str(v).strip().lower()
+    for k, v in (_RAW.get("aliases") or {}).items()
+    if isinstance(k, str) and isinstance(v, str)
 }
+FALLBACK_LAYOUT: str = str(_RAW.get("fallback") or _DEFAULT_FALLBACK)
+
+_CANONICAL_SET: frozenset[str] = frozenset(CANONICAL_LAYOUTS)
 
 
-def _load() -> dict[str, Any]:
-    for path in _CANDIDATE_PATHS:
-        if path.exists():
-            try:
-                return json.loads(path.read_text(encoding="utf-8"))
-            except Exception as exc:  # pragma: no cover — surface but keep booting
-                logger.warning("layouts.registry.json failed to parse at %s: %s", path, exc)
-    logger.info("layouts.registry.json not found; using inline fallback")
-    return _INLINE_FALLBACK
+def normalize_layout(raw: Any) -> str:
+    """Map an arbitrary raw layout value to a canonical layout name.
 
-
-_REGISTRY = _load()
-
-CANONICAL_LAYOUTS: set[str] = {l["name"] for l in _REGISTRY["layouts"]}
-EXPORT_SUPPORTED: set[str] = {l["name"] for l in _REGISTRY["layouts"] if l.get("exported", False)}
-LAYOUT_ALIASES: dict[str, str] = dict(_REGISTRY.get("aliases", {}))
-FALLBACK_LAYOUT: str = _REGISTRY.get("fallback", "bullets")
-
-
-def normalize_layout(raw: str) -> str:
-    """Resolve any layout name (canonical or alias) to a canonical name.
-
-    Falls back to the configured fallback layout for unknown inputs.
+    Canonical layouts pass through unchanged. Known aliases are resolved.
+    Anything else collapses to ``FALLBACK_LAYOUT`` so downstream code can
+    always assume a valid renderer exists.
     """
-    key = (raw or "").strip().lower()
-    if key in CANONICAL_LAYOUTS:
-        return key
-    return LAYOUT_ALIASES.get(key, FALLBACK_LAYOUT)
+    if not isinstance(raw, str):
+        return FALLBACK_LAYOUT
+    name = raw.strip().lower()
+    if name in _CANONICAL_SET:
+        return name
+    aliased = LAYOUT_ALIASES.get(name)
+    if aliased and aliased in _CANONICAL_SET:
+        return aliased
+    return FALLBACK_LAYOUT
 
 
-def is_supported_in_export(name: str) -> bool:
-    """True iff the given canonical layout name has a PPTX renderer."""
-    return normalize_layout(name) in EXPORT_SUPPORTED
+__all__ = [
+    "CANONICAL_LAYOUTS",
+    "EXPORT_SUPPORTED",
+    "LAYOUT_ALIASES",
+    "FALLBACK_LAYOUT",
+    "normalize_layout",
+]

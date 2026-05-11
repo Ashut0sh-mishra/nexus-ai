@@ -11,65 +11,30 @@ from typing import Any, Awaitable, Callable
 
 from sqlalchemy import select
 
+from agent.deck_repair import repair_for_validator
+from agent.layouts_registry import (
+    CANONICAL_LAYOUTS,
+    FALLBACK_LAYOUT,
+    normalize_layout,
+)
 from agent.memory import AgentMemory
 from agent.planner import Planner
-from agent.prompts import (
-    NEXUS_SYSTEM_PROMPT,
-    TOPIC_ANALYZER_SYSTEM_PROMPT,
-    build_slide_prompt,
-    slides_user_message,
-)
+from agent.prompt_intent import extract_slide_count
+from agent.prompts import nexus_system_prompt, slides_user_message
 from agent.prompts import CRITIC_SYSTEM_PROMPT, critic_user_message
-from agent.theme_picker import is_auto, resolve_theme
-from agent.topic_classifier import classify_topic
 from database.connection import SessionLocal
-from database.models import Slide, SlideDeck, Task, UploadedFile
+from database.models import SlideDeck, Task
 from services.claude_service import ClaudeService
-from services.chart_service import process_chart_data
+from services.lifecycle_service import JobCancelled
 from services.search_service import SearchService
 
 logger = logging.getLogger("nexus.agent.loop")
 
 ProgressCallback = Callable[[str, float, str], Awaitable[None]]
 
-_VALID_LAYOUTS = {
-    "title",
-    "section",
-    "bullets",
-    "two-col",
-    "comparison",
-    "kpi",
-    "quote",
-    "stats",
-    "chart",
-    "table",
-    "timeline",
-    "image-focus",
-    "closing",
-}
-
-
-# Map the lowercase theme keywords the topic-analyzer LLM is asked to return
-# onto the canonical theme names the renderer actually knows. Any unknown
-# value yields "" so the caller can fall back to the keyword-bucket picker.
-_LLM_THEME_MAP: dict[str, str] = {
-    "editorial": "Editorial",
-    "light-pro": "light-pro",
-    "lightpro": "light-pro",
-    "light_pro": "light-pro",
-    "dossier": "Dossier",
-    "vellum": "Vellum",
-    "pixel": "Pixel",
-    "dark-pro": "Editorial",
-    "darkpro": "Editorial",
-    "dark_pro": "Editorial",
-}
-
-
-def _map_llm_theme(name: str) -> str:
-    if not name:
-        return ""
-    return _LLM_THEME_MAP.get(name.strip().lower(), "")
+# Valid slide layouts come from the canonical registry. Do NOT reintroduce a
+# hardcoded literal here — it will diverge from the frontend renderer.
+_VALID_LAYOUTS = frozenset(CANONICAL_LAYOUTS)
 
 
 class NexusAgentLoop:
@@ -85,6 +50,108 @@ class NexusAgentLoop:
         self.search = search or SearchService()
         self.planner = planner or Planner(claude=self.claude)
 
+    async def _ai_call(
+        self,
+        *,
+        role: str,
+        system: str,
+        user: str,
+        max_tokens: int,
+        temperature: float = 0.7,
+    ) -> tuple[str, int, float]:
+        """Phase 6W: route via ``complete_for_role`` when available, else
+        fall back to ``complete`` so ClaudeService stand-ins/fakes that
+        don't implement role routing keep working unchanged."""
+        if hasattr(self.claude, "complete_for_role"):
+            return await self.claude.complete_for_role(
+                role=role,
+                system=system,
+                user=user,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        return await self.claude.complete(
+            system=system, user=user, max_tokens=max_tokens, temperature=temperature
+        )
+
+    # ── Phase 6W: research compression (summarize role) ──────────────────
+    # Threshold above which raw research is summarized before reaching the
+    # planner / writer. Below this we keep full text to avoid information
+    # loss on small decks. ~10k chars ≈ ~2.5k tokens.
+    _RESEARCH_SUMMARIZE_THRESHOLD = 10_000
+
+    async def _summarize_long_research(
+        self, topic: str, research: str
+    ) -> tuple[str, int, float]:
+        """Compress harvested research via the ``summarize`` role when long.
+
+        Returns ``(text, tokens, cost)``. If research is short or summarize
+        fails, returns the original text unchanged with zero tokens/cost.
+        Source metadata is preserved separately by the caller; this only
+        compresses the narrative blob.
+        """
+        if not research or len(research) < self._RESEARCH_SUMMARIZE_THRESHOLD:
+            return research, 0, 0.0
+        try:
+            text, tokens, cost = await self._ai_call(
+                role="summarize",
+                system=(
+                    "You compress research notes into dense, fact-preserving "
+                    "summaries. Keep all numbers, dates, names, and citations. "
+                    "Drop filler, marketing language, and duplicates. Plain text only."
+                ),
+                user=(
+                    f"Topic: {topic}\n\n"
+                    f"Compress the following research to <= 1500 words while "
+                    f"preserving every concrete figure, date, and source mention.\n\n"
+                    f"---\n{research}\n---"
+                ),
+                max_tokens=2048,
+                temperature=0.2,
+            )
+            if text and len(text) < len(research):
+                logger.info(
+                    "loop.research_summarized",
+                    extra={"orig_chars": len(research), "new_chars": len(text)},
+                )
+                return text, tokens, cost
+        except Exception as exc:
+            logger.warning("loop.summarize_failed", extra={"err": str(exc)})
+        return research, 0, 0.0
+
+    async def _json_fix_retry(
+        self, raw_text: str, *, expected: str = "array"
+    ) -> tuple[str, int, float]:
+        """Phase 6W: ask the ``json_fix`` role to repair malformed model output.
+
+        Used when ``_parse_slides_array``/``_parse_single_slide`` fails on the
+        primary writer output. Returns ``(repaired_text, tokens, cost)``; the
+        caller is responsible for re-parsing. On any error returns the input
+        text unchanged with zero tokens/cost so callers can fall through to
+        the existing deterministic fallback path.
+        """
+        if not raw_text or not raw_text.strip():
+            return raw_text, 0, 0.0
+        target = "JSON array of slide objects" if expected == "array" else "single JSON slide object"
+        try:
+            text, tokens, cost = await self._ai_call(
+                role="json_fix",
+                system=(
+                    "You repair malformed JSON. Output ONLY valid JSON matching "
+                    "the requested shape. No prose, no code fences, no commentary."
+                ),
+                user=(
+                    f"The following text was supposed to be a {target} but failed to parse. "
+                    f"Repair it and return ONLY the valid JSON.\n\n---\n{raw_text}\n---"
+                ),
+                max_tokens=4096,
+                temperature=0.0,
+            )
+            return text or raw_text, tokens, cost
+        except Exception as exc:
+            logger.warning("loop.json_fix_failed", extra={"err": str(exc)})
+            return raw_text, 0, 0.0
+
     async def run(
         self,
         task_id: str,
@@ -93,430 +160,408 @@ class NexusAgentLoop:
         theme: str,
         search_web: bool,
         on_progress: ProgressCallback,
+        min_sources: int = 0,
     ) -> dict[str, Any]:
         memory = AgentMemory(task_id)
         total_tokens = 0
         total_cost = 0.0
         model_used = self.claude.active_model
+        research_sources: list[dict[str, Any]] = []
+        # Resolved at strategy step; used to build a mode-specific system prompt.
+        _deck_type = "overview"
+        _mood = "neutral"
+        # Phase 6AD: per-slide narrative beats. Computed once after
+        # strategy is built; threaded into ``attach_slide_intent`` and
+        # ``recommend_layouts`` so all downstream consumers see the
+        # same dramatic shape.
+        _beats: list[str] = []
 
-        original_theme = theme
-
-        # Editorial profile (Manus-style): drives word target, fonts, accent
-        # color and image strategy. Always rule-based, never blocks.
-        topic_profile = classify_topic(topic)
-        memory.write_profile(topic_profile)
+        # Phase 6U: honour explicit slide-count requests embedded in the
+        # prompt ("Produce a 12-slide ..."). This overrides the API
+        # default of 8 — the user told us how many slides they want, so
+        # the planner must respect that instead of the field default.
+        hinted = extract_slide_count(topic)
+        if hinted is not None and hinted != slide_count:
+            logger.info(
+                "loop.slide_count_override topic_hint=%d field=%d", hinted, slide_count
+            )
+            slide_count = hinted
 
         try:
-            # 1 — ANALYZE (AI-driven topic analysis)
-            await on_progress("Analyzing your topic...", 6.0, "analyze")
-            await self._mark_running(task_id, "analyze", 6.0)
-            analysis: dict[str, Any] = {}
-            try:
-                analysis, a_tokens, a_cost = await self._analyze_topic(topic)
-                total_tokens += a_tokens
-                total_cost += a_cost
-            except Exception as exc:
-                logger.warning("loop.analyze_failed", extra={"err": str(exc)})
-                analysis = {}
+            # 1 — ANALYZE
+            await on_progress("Analyzing your topic...", 8.0, "analyze")
+            await self._mark_running(task_id, "analyze", 8.0)
 
-            # Apply analysis: theme override (only when caller asked for auto)
-            # and slide_count fallback when caller passed 0/None.
-            # Note: we intentionally ignore the LLM's `best_theme` suggestion
-            # here because it tends to collapse onto a small set (Editorial /
-            # Dossier) regardless of topic, which makes every deck look the
-            # same. Instead we always go through resolve_theme(topic, seed)
-            # which rotates across the full 50-theme catalog per task_id.
-            # When user picked Auto, prefer the editorial-profile theme
-            # (it directly encodes the Manus findings per topic category).
-            if is_auto(original_theme) and topic_profile.get("theme"):
-                resolved_theme = resolve_theme(topic_profile["theme"], topic, seed=task_id)
-            else:
-                resolved_theme = resolve_theme(original_theme, topic, seed=task_id)
-            theme = resolved_theme
-
-            if not slide_count or slide_count <= 0:
-                slide_count = int(analysis.get("ideal_slide_count") or 8)
-            slide_count = max(4, min(20, int(slide_count)))
-
-            topic_type = str(analysis.get("topic_type") or "").strip()
-            tone = str(analysis.get("tone") or "").strip()
-            detect_msg_bits: list[str] = []
-            if topic_type:
-                detect_msg_bits.append(f"{topic_type.title()} topic")
-            if theme:
-                detect_msg_bits.append(f"{theme} theme")
-            if tone:
-                detect_msg_bits.append(f"{tone} tone")
-            detect_msg = (
-                "Detected: " + " \u00b7 ".join(detect_msg_bits)
-                if detect_msg_bits
-                else "Topic analyzed."
-            )
-            await on_progress(
-                detect_msg,
-                10.0,
-                "analyze",
-                event="analysis",
-                analysis=analysis,
-                theme=theme,
-                slide_count=slide_count,
-            )
-            if is_auto(original_theme) and theme:
-                await on_progress(
-                    f"Picked theme: {theme}.",
-                    11.0,
-                    "analyze",
-                    event="theme",
-                    theme=theme,
-                )
-
-            # 2 — SEARCH + 3 PLAN + 4 GENERATE
-            # Markdown-first pipeline (Manus-style): research \u2192 deck_draft.md
-            # \u2192 deck_final.md \u2192 slide JSON. Falls back to legacy JSON pipeline
-            # on failure.
-            from config import settings as _settings
-            slides: list[dict[str, Any]] = []
+            # 2 — SEARCH
             research = ""
-            research_data: dict[str, Any] = {}
-            outline: list[dict[str, Any]] = []
-            use_md = bool(getattr(_settings, "USE_MARKDOWN_PIPELINE", True)) and search_web
-
-            # 1.5 — VERIFIED RESEARCH (Manus-style fact-first)
-            # Pull real facts from Wikipedia/Wikidata/REST Countries/etc BEFORE
-            # any LLM generates content. Stops hallucinations.
             if search_web:
+                await on_progress("Researching topic on the web...", 18.0, "search")
+                await self._mark_running(task_id, "search", 18.0)
                 try:
-                    from services.research_pipeline import (
-                        research_topic, format_research_for_prompt,
+                    # Phase 6U: when a min_sources target is set, harvest
+                    # across follow-up queries until we either hit the
+                    # target or honestly exhaust the providers. The
+                    # 6T benchmark showed that a single ``search()`` call
+                    # often returned 0–3 sources for prompts that needed
+                    # 4–5; ``harvest`` keeps trying instead of silently
+                    # giving up.
+                    if min_sources and hasattr(self.search, "harvest"):
+                        research, search_sources = await self.search.harvest(
+                            topic, target_min=min_sources, max_total=12
+                        )
+                    else:
+                        research, search_sources = await self.search.search(
+                            topic, max_results=6
+                        )
+                    if isinstance(search_sources, list):
+                        research_sources = list(search_sources)
+                except Exception as exc:
+                    logger.warning("loop.search_failed", extra={"err": str(exc)})
+                    research = ""
+            memory.write_research(research)
+
+            # Emit per-source events so the frontend can show live source cards.
+            for src in research_sources[:8]:
+                src_title = (src.get("title") or src.get("url") or "Source")[:100]
+                src_url = src.get("url") or ""
+                await on_progress(src_title, 19.0, "search", event="source_found", url=src_url)
+
+            # Phase 6W: compress very long research before it reaches planner
+            # and writer. Source metadata stays intact in ``research_sources``;
+            # only the narrative blob is summarized.
+            if research:
+                research, _stok, _scost = await self._summarize_long_research(
+                    topic, research
+                )
+                total_tokens += _stok
+                total_cost += _scost
+
+            # Emit research snippet for live intel panel.
+            if research:
+                await on_progress(research[:800], 23.5, "search", event="research_note")
+
+            # 2b — STRATEGY (Phase 6V)
+            # Build a structured deck-strategy artifact from the topic +
+            # harvested research + art-direction. The planner and the
+            # batch-generator now read from this artifact instead of just
+            # the raw research blob, so different deck types produce
+            # different layout orders, story arcs, and visual directions.
+            await on_progress("Building deck strategy...", 24.0, "strategy")
+            try:
+                from agent.art_direction import infer_art_direction
+                from agent.deck_strategy import build_deck_strategy
+
+                art = infer_art_direction(topic, theme)
+                strategy = build_deck_strategy(
+                    topic=topic,
+                    slide_count=slide_count,
+                    art_direction=art,
+                    research=research,
+                    research_sources=research_sources,
+                )
+                memory.write_artifact("strategy.json", strategy.to_dict())
+                _deck_type = strategy.deck_type
+                _mood = art.mood
+
+                # Narrate design decisions so the user can see the AI's
+                # reasoning. These events are surface-only (no schema impact).
+                try:
+                    await on_progress(
+                        f"Deck type: {strategy.deck_type}",
+                        24.5, "strategy",
+                        event="design_decision",
+                        decision="deck_type",
+                        value=strategy.deck_type,
+                        rationale=(strategy.thesis or "")[:240],
                     )
                     await on_progress(
-                        "Researching verified facts from multiple sources...",
-                        14.0, "research",
+                        f"Mood: {art.mood}",
+                        24.7, "strategy",
+                        event="design_decision",
+                        decision="mood",
+                        value=art.mood,
+                        rationale=art.rationale,
+                        category=art.category,
                     )
-                    await self._mark_running(task_id, "research", 14.0)
-                    research_data = await research_topic(
-                        topic,
-                        (topic_profile or {}).get("category", "explainer"),
-                        depth=getattr(_settings, "RESEARCH_DEPTH", "deep"),
-                    )
-                    if research_data.get("sources_used"):
-                        research = format_research_for_prompt(research_data)
-                        try:
-                            memory.write_artifact(
-                                "research_data.json",
-                                json.dumps(research_data, ensure_ascii=False, indent=2),
-                            )
-                        except Exception:
-                            pass
+                    if strategy.story_arc:
                         await on_progress(
-                            f"Verified facts gathered from "
-                            f"{len(research_data['sources_used'])} sources.",
-                            16.0, "research",
-                            event="research",
-                            sources=research_data["sources_used"],
-                            facts_count=len(research_data.get("key_facts", [])),
+                            f"Story arc: {' → '.join(strategy.story_arc[:5])}",
+                            24.9, "strategy",
+                            event="design_decision",
+                            decision="story_arc",
+                            value=list(strategy.story_arc),
+                            rationale=f"{strategy.deck_type} decks pace as: {' → '.join(strategy.story_arc)}",
                         )
-                        logger.info(
-                            "loop.research_pipeline_ok",
-                            extra={
-                                "sources": research_data["sources_used"],
-                                "facts": len(research_data.get("key_facts", [])),
-                                "from_cache": research_data.get("_from_cache", False),
-                            },
+                    if strategy.layout_recipe:
+                        await on_progress(
+                            f"Layout recipe: {', '.join(strategy.layout_recipe[:6])}",
+                            25.1, "strategy",
+                            event="design_decision",
+                            decision="layout_recipe",
+                            value=list(strategy.layout_recipe),
+                            rationale=f"Tone: {strategy.tone}; visual: {strategy.visual_direction}",
                         )
-                except Exception as exc:
-                    logger.warning(
-                        "loop.research_pipeline_failed",
-                        extra={"err": str(exc)},
-                    )
-                    research_data = {}
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("loop.design_decision_emit_failed", extra={"err": str(exc)})
 
-            # 1.6 \u2014 DESIGN REFERENCE (Manus-style structural inspiration)
-            # Pull recommended layout sequence + slide count + palette from
-            # local reference index (and best-effort SlideShare). We bias
-            # the planner with STRUCTURE only \u2014 never copy text.
-            design_ref: dict[str, Any] = {}
-            try:
-                from services.reference_service import (
-                    get_design_inspiration, format_design_reference_for_prompt,
-                )
-                await on_progress(
-                    "Analyzing professional presentation patterns...",
-                    17.0, "research",
-                )
-                design_ref = await get_design_inspiration(
-                    topic, (topic_profile or {}).get("category", "explainer"),
-                )
-                ref_block = format_design_reference_for_prompt(design_ref)
-                if ref_block:
-                    # Prepend to research so both markdown pipeline and the
-                    # legacy planner see it as part of their context.
-                    research = (ref_block + "\n\n" + research) if research else ref_block
-                    try:
-                        memory.write_artifact(
-                            "design_reference.json",
-                            json.dumps(design_ref, ensure_ascii=False, indent=2),
-                        )
-                    except Exception:
-                        pass
-                    rec_count = design_ref.get("recommended_slide_count")
-                    if rec_count and (not slide_count or slide_count <= 0):
-                        slide_count = max(4, min(20, int(rec_count)))
-                    logger.info(
-                        "loop.design_reference_ok",
-                        extra={
-                            "layouts": len(design_ref.get("recommended_layouts") or []),
-                            "slideshare": len(design_ref.get("slideshare_examples") or []),
-                            "sample_count": (design_ref.get("local_reference") or {}).get("sample_count", 0),
-                        },
+                # Phase 6AD: derive narrative beats from the strategy
+                # arc + research signals. Pure-Python; never raises.
+                try:
+                    from agent.narrative_beats import derive_beats
+                    _beats = derive_beats(
+                        slide_count=slide_count,
+                        story_arc=list(strategy.story_arc) if strategy else None,
+                        research=research,
                     )
+                    if _beats:
+                        memory.write_artifact("narrative_beats.json", {"beats": _beats})
+                        await on_progress(
+                            f"Narrative beats: {' → '.join(_beats[:7])}",
+                            25.3, "strategy",
+                            event="design_decision",
+                            decision="narrative_beats",
+                            value=list(_beats),
+                            rationale=(
+                                "Documentary beat sequence derived from the deck strategy "
+                                "and research signals; drives per-slide intent and section "
+                                "divider placement."
+                            ),
+                        )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("loop.narrative_beats_failed", extra={"err": str(exc)})
+                    _beats = []
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("loop.strategy_failed", extra={"err": str(exc)})
+                strategy = None
+            await on_progress(
+                "Research strategy ready.",
+                26.0,
+                "strategy",
+            )
+
+            # 3 — PLAN
+            await on_progress("Planning slide structure...", 28.0, "plan")
+            await self._mark_running(task_id, "plan", 28.0)
+            outline, p_tokens, p_cost = await self.planner.plan(
+                topic, slide_count, research, strategy=strategy
+            )
+            total_tokens += p_tokens
+            total_cost += p_cost
+            memory.write_outline(outline)
+            memory.write_todo(outline)
+
+            # Emit outline so the frontend can show the planned slide structure.
+            if outline:
+                _outline_titles = [
+                    {"i": i + 1, "layout": p.get("layout", ""), "title": p.get("title", "")}
+                    for i, p in enumerate(outline)
+                ]
+                await on_progress(
+                    "Slide structure planned",
+                    29.0,
+                    "plan",
+                    event="outline_ready",
+                    outline=_outline_titles,
+                )
+
+            # 4 — GENERATE
+            slides: list[dict[str, Any]] = []
+            try:
+                slides, g_tokens, g_cost = await self._generate_all_at_once(
+                    topic, slide_count, research, outline, on_progress, memory,
+                    strategy=strategy,
+                    deck_type=_deck_type,
+                    mood=_mood,
+                )
+                total_tokens += g_tokens
+                total_cost += g_cost
             except Exception as exc:
                 logger.warning(
-                    "loop.design_reference_failed",
-                    extra={"err": str(exc)},
+                    "loop.batch_generate_failed_falling_back", extra={"err": str(exc)}
                 )
+                slides = []
 
-            if use_md:
-                try:
-                    from agent.markdown_pipeline import run_markdown_pipeline
-                    md_slides, md_tokens, md_cost, final_md = await run_markdown_pipeline(
-                        topic,
-                        slide_count,
-                        topic_profile,
-                        claude=self.claude,
-                        search=self.search,
-                        memory=memory,
-                        on_progress=on_progress,
-                        prepend_research=research,
-                    )
-                    total_tokens += md_tokens
-                    total_cost += md_cost
-                    if md_slides:
-                        slides = md_slides
-                        # Synthesize an outline-shaped list for downstream
-                        # critic / image / chart steps that read it.
-                        outline = [
-                            {
-                                "index": i,
-                                "layout": s.get("layout", "bullets"),
-                                "title": s.get("title", ""),
-                                "intent": "",
-                            }
-                            for i, s in enumerate(slides)
-                        ]
-                        memory.write_outline(outline)
-                        memory.write_todo(outline)
-                        # Use the final markdown as research context for critic.
-                        research = final_md or ""
-                        memory.write_research(research)
-                        logger.info(
-                            "loop.markdown_pipeline_ok",
-                            extra={"slides": len(slides)},
-                        )
-                except Exception as exc:
-                    logger.warning(
-                        "loop.markdown_pipeline_failed_falling_back",
-                        extra={"err": str(exc)},
-                    )
-                    slides = []
-
-            # Legacy fallback: search \u2192 plan \u2192 generate
             if not slides:
-                if search_web and not research:
-                    await on_progress("Researching topic on the web...", 18.0, "search")
-                    await self._mark_running(task_id, "search", 18.0)
-                    try:
-                        research, _sources = await self.search.search(topic, max_results=6)
-                    except Exception as exc:
-                        logger.warning("loop.search_failed", extra={"err": str(exc)})
-                        research = ""
-                memory.write_research(research)
-
-                await on_progress("Planning slide structure...", 28.0, "plan")
-                await self._mark_running(task_id, "plan", 28.0)
-                task_ctx, audience, tone_meta, industry = await self._load_task_context(task_id)
-                outline, p_tokens, p_cost = await self.planner.plan(
-                    topic,
-                    slide_count,
-                    research,
-                    context=task_ctx,
-                    audience=audience,
-                    tone=tone_meta or tone or None,
-                    industry=industry,
+                slides, g_tokens, g_cost = await self._generate_per_slide(
+                    topic, research, outline, on_progress, memory,
+                    deck_type=_deck_type,
+                    mood=_mood,
                 )
-                total_tokens += p_tokens
-                total_cost += p_cost
-                memory.write_outline(outline)
-                memory.write_todo(outline)
-
-                target_words = int((topic_profile or {}).get("word_target") or 60)
-                prefer_per_slide = target_words >= 90
-                if prefer_per_slide:
-                    logger.info(
-                        "loop.using_per_slide_generation",
-                        extra={"category": topic_profile.get("category"), "target": target_words},
-                    )
-                    try:
-                        slides, g_tokens, g_cost = await self._generate_per_slide(
-                            topic, research, outline, on_progress, memory, analysis,
-                            profile=topic_profile, context=task_ctx,
-                        )
-                        total_tokens += g_tokens
-                        total_cost += g_cost
-                    except Exception as exc:
-                        logger.warning(
-                            "loop.per_slide_generate_failed_falling_back",
-                            extra={"err": str(exc)},
-                        )
-                        slides = []
-
-                if not slides:
-                    try:
-                        slides, g_tokens, g_cost = await self._generate_all_at_once(
-                            topic, slide_count, research, outline, on_progress, memory, analysis,
-                            profile=topic_profile, context=task_ctx,
-                        )
-                        total_tokens += g_tokens
-                        total_cost += g_cost
-                    except Exception as exc:
-                        logger.warning(
-                            "loop.batch_generate_failed_falling_back", extra={"err": str(exc)}
-                        )
-                        slides = []
-
-                if not slides:
-                    slides, g_tokens, g_cost = await self._generate_per_slide(
-                        topic, research, outline, on_progress, memory, analysis,
-                        profile=topic_profile, context=task_ctx,
-                    )
-                    total_tokens += g_tokens
-                    total_cost += g_cost
+                total_tokens += g_tokens
+                total_cost += g_cost
 
             # 5 — ASSEMBLE
             await on_progress("Finalizing presentation...", 90.0, "assemble")
             await self._mark_running(task_id, "assemble", 90.0)
             slides = self._normalize_slides(slides, slide_count, topic)
 
+            # Phase 4: attach research sources to source-bearing layouts.
+            # Advisory only — never invents sources, never fails generation.
+            try:
+                from agent.source_grounding import attach_research_sources_to_deck
+                slides = attach_research_sources_to_deck(slides, research_sources)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("loop.attach_sources_failed", extra={"err": str(exc)})
+
+            # Phase 6AB: attach per-slide intent metadata. Pure function;
+            # never invents content; renderer ignores it if unrecognised.
+            try:
+                from agent.slide_intent import attach_slide_intent
+                slides = attach_slide_intent(
+                    slides,
+                    story_arc=list(strategy.story_arc) if strategy else None,
+                    strategy_tone=strategy.tone if strategy else None,
+                    art_mood=_mood,
+                    beats=_beats if _beats else None,
+                )
+                # Surface the per-slide intent rhythm in the AI-reasoning
+                # panel so the user can see the narrative pacing decision.
+                try:
+                    rhythm = [
+                        {
+                            "i": i + 1,
+                            "role": (s.get("intent") or {}).get("narrative_role"),
+                            "density": (s.get("intent") or {}).get("density"),
+                        }
+                        for i, s in enumerate(slides)
+                        if isinstance(s, dict)
+                    ]
+                    if rhythm:
+                        await on_progress(
+                            f"Pacing: {' · '.join(r['role'] or '?' for r in rhythm[:8])}",
+                            91.0, "assemble",
+                            event="design_decision",
+                            decision="intent_rhythm",
+                            value=rhythm,
+                            rationale=f"Per-slide narrative role and density across {len(rhythm)} slides.",
+                        )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("loop.intent_rhythm_emit_failed", extra={"err": str(exc)})
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("loop.attach_intent_failed", extra={"err": str(exc)})
+
+            # Phase 6AA: deterministic layout upgrader. Uses the intent
+            # metadata attached above plus the slide's own content shape
+            # to promote stats→bigstat / bullets→section_divider when
+            # the upgrade is unambiguous. Never replaces planner choices
+            # otherwise. Re-normalises so the new layouts pick up their
+            # canonical field shape, then re-attaches intent so the
+            # rhythm event reflects the upgrades.
+            try:
+                from agent.layout_recommender import recommend_layouts
+                slides, _layout_upgrades = recommend_layouts(slides)
+                if _layout_upgrades:
+                    slides = self._normalize_slides(slides, slide_count, topic)
+                    try:
+                        from agent.slide_intent import attach_slide_intent
+                        slides = attach_slide_intent(
+                            slides,
+                            story_arc=list(strategy.story_arc) if strategy else None,
+                            strategy_tone=strategy.tone if strategy else None,
+                            art_mood=_mood,
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning("loop.attach_intent_failed", extra={"err": str(exc)})
+                    # One design_decision per upgrade so the AI-reasoning
+                    # panel shows the audit trail.
+                    for u in _layout_upgrades:
+                        try:
+                            await on_progress(
+                                f"Slide {u['slide_index']}: {u['from']} → {u['to']}",
+                                91.5, "assemble",
+                                event="design_decision",
+                                decision="layout_upgrade",
+                                value=u,
+                                rationale=u.get("reason") or "",
+                            )
+                        except Exception as exc:  # pragma: no cover - defensive
+                            logger.warning(
+                                "loop.layout_upgrade_emit_failed",
+                                extra={"err": str(exc)},
+                            )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("loop.layout_recommender_failed", extra={"err": str(exc)})
+
             # 5b — CRITIC (rewrite weak slides for Manus-level specificity)
             try:
                 slides, c_tokens, c_cost = await self._critique_and_rewrite(
-                    topic, research, slides, on_progress, profile=topic_profile,
+                    topic, research, slides, on_progress
                 )
                 total_tokens += c_tokens
                 total_cost += c_cost
                 slides = self._normalize_slides(slides, slide_count, topic)
+                # Re-attach: critic may have rewritten chart/stats slides.
+                try:
+                    from agent.source_grounding import attach_research_sources_to_deck
+                    slides = attach_research_sources_to_deck(slides, research_sources)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("loop.attach_sources_failed", extra={"err": str(exc)})
+                # Re-attach intent — critic may have changed layout / density.
+                try:
+                    from agent.slide_intent import attach_slide_intent
+                    slides = attach_slide_intent(
+                        slides,
+                        story_arc=list(strategy.story_arc) if strategy else None,
+                        strategy_tone=strategy.tone if strategy else None,
+                        art_mood=_mood,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("loop.attach_intent_failed", extra={"err": str(exc)})
             except Exception as exc:
                 logger.warning("loop.critic_failed", extra={"err": str(exc)})
-
-            # 5b.2 — FACT CHECK against verified research
-            if research_data:
-                try:
-                    from services.fact_checker import verify_slides
-                    slides = await verify_slides(slides, research_data)
-                    flagged = sum(1 for s in slides if isinstance(s, dict) and s.get("_fact_check"))
-                    if flagged:
-                        await on_progress(
-                            f"Fact-check flagged {flagged} slide(s) for review.",
-                            89.0, "assemble",
-                            event="fact_check", flagged=flagged,
-                        )
-                except Exception as exc:
-                    logger.warning("loop.fact_check_failed", extra={"err": str(exc)})
 
             # 5c — IMAGES (hero visual per slide via Pollinations)
             try:
                 slides, i_tokens, i_cost = await self._add_hero_images(
-                    topic, slides, on_progress, profile=topic_profile,
-                    images_context=(research_data or {}).get("images_context") or [],
+                    topic, slides, on_progress
                 )
                 total_tokens += i_tokens
                 total_cost += i_cost
             except Exception as exc:
                 logger.warning("loop.images_failed", extra={"err": str(exc)})
 
-            # 5d — CHART PROCESSING (renderer-ready chartjs+pptx config)
-            try:
-                slides = self._process_charts(slides, theme)
-            except Exception as exc:
-                logger.warning("loop.charts_failed", extra={"err": str(exc)})
-
             # 6 — SAVE
-            # Stamp the editorial profile's fonts + accent onto every slide so
-            # the PPTX exporter can pick them up without us threading profile
-            # through the export route. Idempotent — uses setdefault.
-            try:
-                fp = (topic_profile or {}).get("font_pair") or {}
-                heading_font = (fp.get("heading") or "Inter").strip() or "Inter"
-                body_font = (fp.get("body") or "Inter").strip() or "Inter"
-                accent = (topic_profile or {}).get("accent_color") or ""
-                for s in slides:
-                    if isinstance(s, dict):
-                        s.setdefault("_font_heading", heading_font)
-                        s.setdefault("_font_body", body_font)
-                        if accent:
-                            s.setdefault("_accent_override", accent)
-            except Exception as exc:
-                logger.warning(
-                    "loop.profile_stamp_failed",
-                    extra={"err": str(exc), "err_type": type(exc).__name__},
-                    exc_info=True,
-                )
-
             await on_progress("Saving your slides...", 96.0, "save")
+            # Phase 6U: final pass that fills layout-local defaults
+            # (title.subtitle/eyebrow, closing.subtitle/cta, chart.subtitle,
+            # quote.attribution, chart_data.unit/source) so the deck
+            # satisfies ``validate_deck`` before persisting. The leading
+            # cause of the 6T ``deck_quality_ok=1/11`` regression was the
+            # safety-net inside ``_normalize_slides`` that pins
+            # ``out[0].layout='title'`` and ``out[-1].layout='closing'``
+            # without seeding the required fields for those layouts. The
+            # repair pass closes that gap without inventing content.
+            try:
+                slides = repair_for_validator(slides)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("loop.deck_repair_failed", extra={"err": str(exc)})
             await self._save_deck(task_id, slides, theme, total_tokens, total_cost, model_used)
 
             await on_progress("Done! Your slides are ready.", 100.0, "done", status="done")
-
-            # PRD §16 — fire deck.completed webhook (best-effort).
-            try:
-                from api.routes.webhooks import dispatch_event
-                await dispatch_event(
-                    "deck.completed",
-                    {"task_id": task_id, "topic": topic, "slide_count": len(slides), "theme": theme},
-                )
-            except Exception as exc:  # pragma: no cover
-                logger.debug("loop.webhook_completed_failed", extra={"err": str(exc)})
-
             return {"slides": slides, "tokens": total_tokens, "cost_usd": total_cost}
 
+        except JobCancelled as exc:
+            # Phase 6Q: graceful cancel. Worker top-level finalizes the
+            # row via ``lifecycle_service.mark_cancelled`` and the SSE
+            # stream closes once the ``cancelled`` event is published.
+            logger.info(
+                "loop.cancelled",
+                extra={"task_id": task_id, "stage": str(exc) or "unknown"},
+            )
+            await on_progress(
+                "Generation cancelled by user.",
+                100.0,
+                "cancelled",
+                status="cancelled",
+            )
+            raise
         except Exception as exc:
             logger.exception("loop.failed", extra={"task_id": task_id})
             await self._mark_failed(task_id, str(exc))
             await on_progress(f"Generation failed: {exc}", 100.0, "failed", status="failed", error=str(exc))
-            try:
-                from api.routes.webhooks import dispatch_event
-                await dispatch_event(
-                    "deck.failed",
-                    {"task_id": task_id, "topic": topic, "error": str(exc)},
-                )
-            except Exception:  # pragma: no cover
-                pass
             raise
 
     # ── generation strategies ─────────────────────────────────────────────
-    async def _analyze_topic(self, topic: str) -> tuple[dict[str, Any], int, float]:
-        """Ask the LLM to classify the topic and propose theme/length/tone."""
-        text, tokens, cost = await self.claude.complete(
-            system=TOPIC_ANALYZER_SYSTEM_PROMPT,
-            user=f"Analyze this topic: {topic}",
-            max_tokens=512,
-            temperature=0.2,
-        )
-        cleaned = (text or "").strip()
-        if cleaned.startswith("```"):
-            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE)
-        m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if not m:
-            return {}, tokens, cost
-        try:
-            data = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            return {}, tokens, cost
-        if not isinstance(data, dict):
-            return {}, tokens, cost
-        logger.info("loop.topic_analysis", extra={"analysis": data})
-        return data, tokens, cost
-
     async def _generate_all_at_once(
         self,
         topic: str,
@@ -525,9 +570,10 @@ class NexusAgentLoop:
         outline: list[dict[str, Any]],
         on_progress: ProgressCallback,
         memory: AgentMemory,
-        analysis: dict[str, Any] | None = None,
         *,
-        profile: dict[str, Any] | None = None,
+        strategy: Any | None = None,
+        deck_type: str = "overview",
+        mood: str = "neutral",
     ) -> tuple[list[dict[str, Any]], int, float]:
         await on_progress(f"Writing slides 1 of {slide_count}...", 35.0, "generate")
         outline_text = "\n".join(
@@ -535,19 +581,22 @@ class NexusAgentLoop:
             for i, p in enumerate(outline)
         )
         user_msg = slides_user_message(
-            topic, slide_count, research, outline_text, profile=profile
+            topic, slide_count, research, outline_text, strategy=strategy
         )
-        system_prompt = (
-            build_slide_prompt(topic, analysis, research)
-            if analysis
-            else NEXUS_SYSTEM_PROMPT
-        )
-        text, tokens, cost = await self.claude.complete(
-            system=system_prompt,
+        text, tokens, cost = await self._ai_call(
+            role="writer",
+            system=nexus_system_prompt(deck_type, mood),
             user=user_msg,
             max_tokens=8096,
         )
         slides = self._parse_slides_array(text)
+        if not slides:
+            # Phase 6W: try a single json_fix repair before giving up.
+            repaired, rtok, rcost = await self._json_fix_retry(text, expected="array")
+            tokens += rtok
+            cost += rcost
+            if repaired and repaired != text:
+                slides = self._parse_slides_array(repaired)
         if not slides:
             return [], tokens, cost
         for i, slide in enumerate(slides[:slide_count]):
@@ -572,18 +621,11 @@ class NexusAgentLoop:
         outline: list[dict[str, Any]],
         on_progress: ProgressCallback,
         memory: AgentMemory,
-        analysis: dict[str, Any] | None = None,
         *,
-        profile: dict[str, Any] | None = None,
-        context: dict[str, Any] | None = None,
+        deck_type: str = "overview",
+        mood: str = "neutral",
     ) -> tuple[list[dict[str, Any]], int, float]:
         from agent.prompts import single_slide_user_message
-
-        system_prompt = (
-            build_slide_prompt(topic, analysis, research)
-            if analysis
-            else NEXUS_SYSTEM_PROMPT
-        )
 
         slides: list[dict[str, Any]] = []
         total_tokens = 0
@@ -599,12 +641,7 @@ class NexusAgentLoop:
             await on_progress(
                 f"Writing slide {i + 1} of {n}...", min(pct, 85.0), "generate"
             )
-            base_user = single_slide_user_message(
-                topic, research, plan, i, n,
-                profile=profile,
-                prior_slides=slides[-3:] if slides else None,
-                context=context,
-            )
+            base_user = single_slide_user_message(topic, research, plan, i, n)
             slide = None
             for attempt in range(MAX_ATTEMPTS):
                 # Perturb prompt + temperature on retry to break repeat loops.
@@ -618,8 +655,9 @@ class NexusAgentLoop:
                     )
                     temp = 0.95
                 try:
-                    text, tokens, cost = await self.claude.complete(
-                        system=system_prompt,
+                    text, tokens, cost = await self._ai_call(
+                        role="writer",
+                        system=nexus_system_prompt(deck_type, mood),
                         user=user_msg,
                         max_tokens=2048,
                         temperature=temp,
@@ -637,6 +675,16 @@ class NexusAgentLoop:
                     slide = self._parse_single_slide(text)
                     if slide is not None:
                         break
+                    # Phase 6W: one json_fix retry before next attempt/fallback.
+                    repaired, rtok, rcost = await self._json_fix_retry(
+                        text, expected="object"
+                    )
+                    total_tokens += rtok
+                    total_cost += rcost
+                    if repaired and repaired != text:
+                        slide = self._parse_single_slide(repaired)
+                        if slide is not None:
+                            break
                 except Exception as exc:
                     logger.warning(
                         "loop.single_slide_failed",
@@ -686,8 +734,8 @@ class NexusAgentLoop:
     def _is_weak(cls, slide: dict[str, Any]) -> bool:
         """Heuristic: bland phrases or no concrete data → needs critic rewrite."""
         layout = slide.get("layout")
-        if layout in ("title", "closing", "chart", "table", "timeline", "image-focus"):
-            return False  # Don't waste tokens rewriting titles/closings/structured layouts.
+        if layout in ("title", "closing"):
+            return False  # Don't waste tokens rewriting titles/closings.
 
         # Collect all visible text from the slide.
         chunks: list[str] = [str(slide.get("title") or "")]
@@ -742,8 +790,6 @@ class NexusAgentLoop:
         research: str,
         slides: list[dict[str, Any]],
         on_progress: ProgressCallback,
-        *,
-        profile: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], int, float]:
         """For each weak slide, ask the LLM to rewrite it with specifics."""
         weak_indices = [i for i, s in enumerate(slides) if self._is_weak(s)]
@@ -766,9 +812,10 @@ class NexusAgentLoop:
             nonlocal total_tokens, total_cost
             original = out[idx]
             try:
-                text, tokens, cost = await self.claude.complete(
+                text, tokens, cost = await self._ai_call(
+                    role="critic",
                     system=CRITIC_SYSTEM_PROMPT,
-                    user=critic_user_message(topic, research, original, profile=profile),
+                    user=critic_user_message(topic, research, original),
                     max_tokens=1024,
                 )
                 total_tokens += tokens
@@ -806,80 +853,78 @@ class NexusAgentLoop:
         return out, total_tokens, total_cost
 
     # ── hero images ────────────────────────────────────────────────────────
+    # Layouts that benefit from a background visual. quote/stats are skipped
+    # because they're already centerpiece compositions and would clutter.
+    _IMAGE_LAYOUTS = {"title", "bullets", "two-col", "closing"}
+
     async def _add_hero_images(
         self,
         topic: str,
         slides: list[dict[str, Any]],
         on_progress: ProgressCallback,
-        *,
-        profile: dict[str, Any] | None = None,
-        images_context: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], int, float]:
-        """Attach a recommended image (stock or AI) per slide.
-
-        Stock APIs (Unsplash → Pexels) are used when ``UNSPLASH_ACCESS_KEY`` /
-        ``PEXELS_API_KEY`` are set; otherwise we fall back to a Pollinations
-        URL with a layout-tuned prompt. Layouts like ``chart``/``stats``/
-        ``quote`` are skipped because the recommender returns ``None`` for
-        compositions that already carry their own visual.
-
-        Honors the editorial profile's ``image_strategy``: history / research
-        decks ship with no images at all, data decks only on title/closing,
-        and pitch / brand decks get full hero treatment.
-        """
-        from services.image_service import recommend_images, should_have_image_for_profile
+        """Attach a Pollinations image URL to slides that benefit from a visual."""
+        from services.image_service import pollinations_url
 
         target_indices = [
-            i for i, s in enumerate(slides)
-            if should_have_image_for_profile(s.get("layout"), profile)
+            i for i, s in enumerate(slides) if s.get("layout") in self._IMAGE_LAYOUTS
         ]
         if not target_indices:
-            logger.info(
-                "images.skipped_by_profile",
-                extra={
-                    "category": (profile or {}).get("category"),
-                    "strategy": (profile or {}).get("image_strategy"),
-                },
-            )
             return slides, 0, 0.0
 
         await on_progress("Generating slide imagery...", 94.0, "images")
 
-        # PRD §20: parallel image fetch — bounded so we don't hammer stock APIs.
-        import asyncio
-        semaphore = asyncio.Semaphore(4)
-
-        async def _one(i: int) -> tuple[int, dict | None]:
-            async with semaphore:
-                try:
-                    rec = await recommend_images(
-                        slides[i], topic=topic, seed=i + 1,
-                        images_context=images_context,
-                    )
-                    return i, rec
-                except Exception as exc:
-                    logger.warning(
-                        "images.recommend_failed", extra={"i": i, "err": str(exc)}
-                    )
-                    return i, None
-
-        results = await asyncio.gather(*[_one(i) for i in target_indices])
-
-        attached = 0
-        for i, rec in results:
-            if not rec or not rec.get("url"):
-                continue
-            slides[i]["image"] = rec
-            slides[i]["image_url"] = rec["url"]
-            slides[i]["image_prompt"] = rec.get("prompt") or slides[i].get(
-                "image_prompt", ""
+        # ONE LLM call to generate concise visual prompts for every target slide.
+        prompts: list[str] = []
+        tokens = 0
+        cost = 0.0
+        try:
+            indexed = "\n".join(
+                f"{i + 1}. layout={slides[i].get('layout')} title={slides[i].get('title','')}"
+                for i in target_indices
             )
-            attached += 1
+            user = (
+                f"Topic: {topic}\n\n"
+                f"Slides needing a hero image:\n{indexed}\n\n"
+                f"For EACH slide above, write a single concise visual prompt (max 18 words) "
+                f"that an image model can render as a clean, editorial, non-text background. "
+                f"Avoid: text, logos, watermarks, faces of real people. "
+                f"Prefer: abstract gradients, photographic scenes, minimal compositions.\n"
+                f"Return ONLY a JSON array of strings in slide order. No prose."
+            )
+            text, tokens, cost = await self._ai_call(
+                role="vision",
+                system="You write concise visual prompts for an image model. Return only a JSON array of strings.",
+                user=user,
+                max_tokens=600,
+                temperature=0.4,
+            )
+            cleaned = self._strip_fences(text)
+            match = re.search(r"\[[\s\S]*\]", cleaned)
+            if match:
+                cleaned = match.group(0)
+            data = json.loads(cleaned)
+            if isinstance(data, list):
+                prompts = [str(p) for p in data]
+        except Exception as exc:
+            logger.warning("images.prompt_gen_failed", extra={"err": str(exc)})
+            prompts = []
+
+        # Fallback: if the LLM failed, build prompts from slide titles.
+        if len(prompts) < len(target_indices):
+            for i in target_indices[len(prompts) :]:
+                t = slides[i].get("title") or topic
+                prompts.append(f"editorial abstract visual for: {t}, soft gradient, no text")
+
+        for slot, idx in enumerate(target_indices):
+            prompt = prompts[slot] if slot < len(prompts) else f"abstract {topic}"
+            slides[idx]["image_url"] = pollinations_url(prompt, seed=idx + 1)
+            slides[idx]["image_prompt"] = prompt
 
         logger.info(
-            "images.attached", extra={"count": attached, "total": len(slides)}
+            "images.attached", extra={"count": len(target_indices), "total": len(slides)}
         )
-        return slides, 0, 0.0
+        return slides, tokens, cost
 
 
     @staticmethod
@@ -921,26 +966,21 @@ class NexusAgentLoop:
     ) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for i, raw in enumerate(slides):
-            layout = str(raw.get("layout") or "").strip().lower()
+            # Resolve via the canonical registry so aliases (when added)
+            # and unknown values both go through one path.
+            layout = normalize_layout(raw.get("layout"))
             if layout not in _VALID_LAYOUTS:
-                layout = "bullets"
+                layout = FALLBACK_LAYOUT
             base = {
                 "id": f"slide-{i:03d}",
                 "layout": layout,
                 "title": str(raw.get("title") or "").strip(),
             }
             if layout == "title":
-                # NB: do NOT fall back to `tagline` for the eyebrow — the
-                # tagline is the long opening sentence and would overflow the
-                # eyebrow band on the title slide.
-                eyebrow = str(raw.get("eyebrow") or "Presentation").strip()
-                if len(eyebrow) > 60:
-                    eyebrow = eyebrow[:60].rsplit(" ", 1)[0] + "…"
                 base.update(
                     {
                         "subtitle": str(raw.get("subtitle") or "").strip(),
-                        "eyebrow": eyebrow,
-                        "tagline": str(raw.get("tagline") or "").strip(),
+                        "eyebrow": str(raw.get("eyebrow") or "Presentation").strip(),
                     }
                 )
             elif layout == "bullets":
@@ -948,27 +988,18 @@ class NexusAgentLoop:
                 if not isinstance(bullets, list):
                     bullets = []
                 base["bullets"] = [str(b).strip() for b in bullets if str(b).strip()][:4]
-                base["section"] = str(raw.get("section") or "").strip()
             elif layout == "two-col":
-                cols_raw = raw.get("columns")
-                if isinstance(cols_raw, list) and cols_raw:
-                    cols = [
-                        {
-                            "heading": str(c.get("heading") or c.get("title") or "").strip(),
-                            "body": str(c.get("body") or c.get("content") or "").strip(),
-                        }
-                        for c in cols_raw[:2]
-                        if isinstance(c, dict)
-                    ]
-                else:
-                    # Accept flat schema: col1_title/col1_content/col2_title/col2_content.
+                cols = raw.get("columns") or []
+                if not isinstance(cols, list):
                     cols = []
-                    for n in (1, 2):
-                        h = str(raw.get(f"col{n}_title") or "").strip()
-                        b = str(raw.get(f"col{n}_content") or "").strip()
-                        if h or b:
-                            cols.append({"heading": h, "body": b})
-                base["columns"] = cols
+                base["columns"] = [
+                    {
+                        "heading": str(c.get("heading") or "").strip(),
+                        "body": str(c.get("body") or "").strip(),
+                    }
+                    for c in cols[:2]
+                    if isinstance(c, dict)
+                ]
             elif layout == "quote":
                 base["quote"] = str(raw.get("quote") or raw.get("title") or "").strip()
                 base["attribution"] = str(raw.get("attribution") or "").strip()
@@ -980,7 +1011,6 @@ class NexusAgentLoop:
                     {
                         "value": str(s.get("value") or "").strip(),
                         "label": str(s.get("label") or "").strip(),
-                        "trend": str(s.get("trend") or "").strip(),
                     }
                     for s in stats[:3]
                     if isinstance(s, dict)
@@ -989,9 +1019,8 @@ class NexusAgentLoop:
                 cd = raw.get("chart_data") or {}
                 if not isinstance(cd, dict):
                     cd = {}
-                # Accept flat schema (labels/values/unit/source at root) too.
-                labels = cd.get("labels") or raw.get("labels") or []
-                values = cd.get("values") or raw.get("values") or []
+                labels = cd.get("labels") or []
+                values = cd.get("values") or []
                 if not isinstance(labels, list):
                     labels = []
                 if not isinstance(values, list):
@@ -1004,116 +1033,79 @@ class NexusAgentLoop:
                     except (TypeError, ValueError):
                         numeric.append(0.0)
                 pairs = min(len(labels), len(numeric))
-                ct = str(raw.get("chart_type") or "bar").strip().lower() or "bar"
-                if ct == "pie":
-                    ct = "doughnut"
-                if ct not in {"bar", "line", "doughnut"}:
-                    ct = "bar"
-                base["chart_type"] = ct
+                base["chart_type"] = (
+                    str(raw.get("chart_type") or "bar").strip().lower() or "bar"
+                )
+                if base["chart_type"] not in {"bar", "line", "doughnut"}:
+                    base["chart_type"] = "bar"
                 base["chart_data"] = {
                     "labels": [str(x).strip() for x in labels[:pairs]],
                     "values": numeric[:pairs],
-                    "unit": str(cd.get("unit") or raw.get("unit") or "").strip(),
-                    "source": str(cd.get("source") or raw.get("source") or "").strip(),
+                    "unit": str(cd.get("unit") or "").strip(),
+                    "source": str(cd.get("source") or "").strip(),
                 }
                 base["subtitle"] = str(raw.get("subtitle") or "").strip()
             elif layout == "closing":
-                base["subtitle"] = str(
-                    raw.get("subtitle") or raw.get("message") or ""
-                ).strip()
-                base["message"] = str(raw.get("message") or "").strip()
+                base["subtitle"] = str(raw.get("subtitle") or "").strip()
                 base["cta"] = str(raw.get("cta") or "Thank you").strip()
-                base["tagline"] = str(raw.get("tagline") or "").strip()
-            elif layout == "table":
-                headers = raw.get("headers") or []
-                rows = raw.get("rows") or []
-                if not isinstance(headers, list):
-                    headers = []
-                if not isinstance(rows, list):
-                    rows = []
-                base["headers"] = [str(h).strip() for h in headers][:6]
-                base["rows"] = [
-                    [str(c).strip() for c in (r if isinstance(r, list) else [])][:6]
-                    for r in rows[:8]
-                ]
+            elif layout == "bigstat":
+                # Phase 6AA — preserve value / label / subtitle. If the
+                # source slide carries a stats[] array (because the
+                # recommender upgraded it), fall back to its first stat.
+                stats_first = None
+                stats = raw.get("stats")
+                if isinstance(stats, list) and stats and isinstance(stats[0], dict):
+                    stats_first = stats[0]
+                base["value"] = str(
+                    raw.get("value")
+                    or (stats_first.get("value") if stats_first else "")
+                    or ""
+                ).strip()
+                base["label"] = str(
+                    raw.get("label")
+                    or (stats_first.get("label") if stats_first else "")
+                    or ""
+                ).strip()
+                base["subtitle"] = str(raw.get("subtitle") or "").strip()
+            elif layout == "section_divider":
+                # Phase 6AA — typography-only block. Eyebrow/subtitle
+                # default to empty so the validator accepts the slide.
+                base["eyebrow"] = str(raw.get("eyebrow") or "").strip()
+                base["subtitle"] = str(raw.get("subtitle") or "").strip()
             elif layout == "timeline":
+                # Phase 6AC — chronology of dated events. Up to 6 events
+                # are kept; each event is sanitized into {date, label}.
                 events = raw.get("events") or []
                 if not isinstance(events, list):
                     events = []
                 base["events"] = [
                     {
-                        "year": str(e.get("year") or "").strip(),
-                        "title": str(e.get("title") or "").strip(),
-                        "desc": str(e.get("desc") or e.get("description") or "").strip(),
+                        "date": str(e.get("date") or "").strip(),
+                        "label": str(e.get("label") or "").strip(),
                     }
                     for e in events[:6]
                     if isinstance(e, dict)
                 ]
-            elif layout == "image-focus":
-                base["caption"] = str(raw.get("caption") or raw.get("subtitle") or "").strip()
-                base["image_prompt"] = str(raw.get("image_prompt") or "").strip()
-            elif layout == "section":
-                base["eyebrow"] = str(
-                    raw.get("eyebrow") or raw.get("section") or "Section"
-                ).strip()
-                base["subtitle"] = str(
-                    raw.get("subtitle") or raw.get("description") or ""
-                ).strip()
-                base["section_number"] = str(
-                    raw.get("section_number") or raw.get("number") or ""
-                ).strip()
-            elif layout == "kpi":
-                kpis_raw = raw.get("kpis") or raw.get("stats") or []
-                if not isinstance(kpis_raw, list):
-                    kpis_raw = []
-                base["kpis"] = [
-                    {
-                        "value": str(k.get("value") or "").strip(),
-                        "label": str(k.get("label") or "").strip(),
-                        "sublabel": str(
-                            k.get("sublabel") or k.get("description") or ""
-                        ).strip(),
-                        "delta": str(k.get("delta") or k.get("trend") or "").strip(),
-                        "direction": str(k.get("direction") or "").strip().lower(),
-                    }
-                    for k in kpis_raw[:4]
-                    if isinstance(k, dict)
-                ]
                 base["subtitle"] = str(raw.get("subtitle") or "").strip()
             elif layout == "comparison":
-                items_raw = raw.get("items") or raw.get("columns") or []
-                if not isinstance(items_raw, list):
-                    items_raw = []
-                items: list[dict[str, Any]] = []
-                for c in items_raw[:2]:
-                    if not isinstance(c, dict):
-                        continue
-                    points = c.get("points") or c.get("bullets") or []
-                    if not isinstance(points, list):
-                        points = []
-                    items.append(
-                        {
-                            "heading": str(
-                                c.get("heading") or c.get("title") or ""
-                            ).strip(),
-                            "subtitle": str(
-                                c.get("subtitle") or c.get("tagline") or ""
-                            ).strip(),
-                            "points": [str(p).strip() for p in points if str(p).strip()][:4],
-                            "body": str(c.get("body") or "").strip(),
-                        }
-                    )
-                # Accept flat schema as a fallback.
-                if not items:
-                    for n in (1, 2):
-                        h = str(raw.get(f"col{n}_title") or "").strip()
-                        b = str(raw.get(f"col{n}_content") or "").strip()
-                        if h or b:
-                            items.append(
-                                {"heading": h, "subtitle": "", "points": [], "body": b}
-                            )
-                base["items"] = items
-                base["divider"] = str(raw.get("divider") or "vs").strip()
+                # Phase 6AC — side-by-side comparison. Both sides are
+                # sanitized; missing sides default to empty heading/body
+                # so the deck-repair pass + validator surface the gap.
+                left = raw.get("left") or {}
+                right = raw.get("right") or {}
+                if not isinstance(left, dict):
+                    left = {}
+                if not isinstance(right, dict):
+                    right = {}
+                base["left"] = {
+                    "heading": str(left.get("heading") or "").strip(),
+                    "body": str(left.get("body") or "").strip(),
+                }
+                base["right"] = {
+                    "heading": str(right.get("heading") or "").strip(),
+                    "body": str(right.get("body") or "").strip(),
+                }
+                base["subtitle"] = str(raw.get("subtitle") or "").strip()
             out.append(base)
 
         # pad / trim to slide_count
@@ -1166,8 +1158,44 @@ class NexusAgentLoop:
                         "unit": "",
                         "source": s.get("source", ""),
                     }
+                    # P1-2: chart slides require a slide-level ``subtitle``
+                    # per the tightened schema. The safety-net previously
+                    # produced chart slides without it, generating a
+                    # self-inflicted validation warning on every deck. Carry
+                    # forward whatever the source stats slide had, default "".
+                    s["subtitle"] = s.get("subtitle", "")
                     s.pop("stats", None)
                     break
+
+        # Phase 1C: non-repairing deck-quality telemetry. Build a
+        # structured ``DeckQualityReport`` from the normalized deck and
+        # log per-slide failures + a deck-level summary. We do NOT
+        # mutate ``out`` and we do NOT reject slides — this is
+        # observability only until a repair pipeline lands later.
+        try:
+            from agent.deck_quality import build_deck_quality_report  # local import to avoid app/db cycles
+
+            report = build_deck_quality_report(out)
+            for record in report.errors:
+                logger.warning(
+                    "loop.slide_validation_failed slide=%d layout=%s path=%s code=%s message=%s",
+                    record["slide_index"],
+                    record["layout"],
+                    record["path"],
+                    record["code"],
+                    record["message"],
+                )
+            logger.info(
+                "loop.deck_quality_report ok=%s slide_count=%d valid=%d invalid=%d repairs_needed=%d",
+                report.ok,
+                report.slide_count,
+                report.valid_count,
+                report.invalid_count,
+                len(report.repair_actions),
+            )
+        except Exception as exc:  # pragma: no cover — telemetry must never break generation
+            logger.warning("loop.slide_validation_telemetry_failed err=%s", exc)
+
         return out
 
     @staticmethod
@@ -1189,108 +1217,6 @@ class NexusAgentLoop:
             ],
         }
 
-    # ── context loading ───────────────────────────────────────────────────
-    async def _load_task_context(
-        self, task_id: str
-    ) -> tuple[dict[str, Any], str | None, str | None, str | None]:
-        """Load Task metadata + uploaded files + aggregate BI for the planner.
-
-        Returns ``(context, audience, tone, industry)`` where ``context`` has
-        the shape expected by ``Planner.plan``::
-
-            {
-              "business_intelligence": {chart_opportunities, kpi_candidates,
-                                        insights, data_tables},
-              "files": [{filename, file_type, preview}, ...],
-            }
-        """
-        ctx: dict[str, Any] = {}
-        audience: str | None = None
-        tone: str | None = None
-        industry: str | None = None
-        try:
-            async with SessionLocal() as session:
-                t_res = await session.execute(select(Task).where(Task.id == task_id))
-                task = t_res.scalar_one_or_none()
-                if task is None:
-                    return ctx, None, None, None
-                audience = task.audience or None
-                tone = task.tone or None
-                industry = task.industry or None
-
-                # Uploaded files explicitly attached to this task. Also include
-                # files referenced by Task.context_sources (file_id list).
-                wanted_ids: list[str] = []
-                src = task.context_sources
-                if isinstance(src, list):
-                    wanted_ids = [str(x) for x in src if x]
-
-                f_res = await session.execute(
-                    select(UploadedFile).where(UploadedFile.task_id == task_id)
-                )
-                files = list(f_res.scalars().all())
-                if wanted_ids:
-                    extra_res = await session.execute(
-                        select(UploadedFile).where(UploadedFile.id.in_(wanted_ids))
-                    )
-                    seen = {f.id for f in files}
-                    for ef in extra_res.scalars().all():
-                        if ef.id not in seen:
-                            files.append(ef)
-
-                if not files:
-                    return ctx, audience, tone, industry
-
-                file_summaries: list[dict[str, Any]] = []
-                charts: list[dict[str, Any]] = []
-                kpis: list[dict[str, Any]] = []
-                tables: list[dict[str, Any]] = []
-                insights: list[str] = []
-                # Defensive: legacy rows may carry the uuid_-prefixed disk name.
-                _UUID_PREFIX = re.compile(r"^[0-9a-f]{32}_")
-                for f in files:
-                    preview = (f.extracted_text or "").strip()
-                    # Keep the full preview for small files (LLM context)
-                    # and a generous slice for larger ones. Newlines are
-                    # preserved so JSON / Markdown structure survives.
-                    if preview:
-                        preview = preview[:12000]
-                    display_name = _UUID_PREFIX.sub("", f.filename or "")
-                    file_summaries.append(
-                        {
-                            "id": f.id,
-                            "filename": display_name or f.filename,
-                            "file_type": f.file_type,
-                            "preview": preview,
-                        }
-                    )
-                    data = f.extracted_data_json or {}
-                    if not isinstance(data, dict):
-                        continue
-                    bi = data.get("business_intelligence") or {}
-                    if not isinstance(bi, dict):
-                        continue
-                    if isinstance(bi.get("chart_opportunities"), list):
-                        charts.extend(bi["chart_opportunities"])
-                    if isinstance(bi.get("kpi_candidates"), list):
-                        kpis.extend(bi["kpi_candidates"])
-                    if isinstance(bi.get("data_tables"), list):
-                        tables.extend(bi["data_tables"])
-                    if isinstance(bi.get("insights"), list):
-                        insights.extend(str(x) for x in bi["insights"])
-
-                ctx["files"] = file_summaries
-                if charts or kpis or tables or insights:
-                    ctx["business_intelligence"] = {
-                        "chart_opportunities": charts,
-                        "kpi_candidates": kpis,
-                        "data_tables": tables,
-                        "insights": insights,
-                    }
-        except Exception as exc:
-            logger.warning("loop.load_context_failed", extra={"err": str(exc)})
-        return ctx, audience, tone, industry
-
     # ── DB writes ─────────────────────────────────────────────────────────
     async def _mark_running(self, task_id: str, step: str, pct: float) -> None:
         async with SessionLocal() as session:
@@ -1298,6 +1224,11 @@ class NexusAgentLoop:
             task = res.scalar_one_or_none()
             if task is None:
                 return
+            # Phase 6Q: cancel checkpoint. The lifecycle endpoint flips
+            # ``Task.status`` to ``cancelling``; the loop honours it at
+            # every stage transition and exits via :class:`JobCancelled`.
+            if task.status == "cancelling":
+                raise JobCancelled(step)
             task.status = "running"
             task.current_step = step
             task.progress_pct = pct
@@ -1346,19 +1277,6 @@ class NexusAgentLoop:
                 deck.slide_count = len(slides)
                 session.add(deck)
 
-            # Write per-slide rows into deck_slides. Re-runs replace the
-            # previous rows so slide_number stays stable and the unique
-            # (task_id, slide_number) constraint never trips.
-            old_rows = await session.execute(
-                select(Slide).where(Slide.task_id == task_id)
-            )
-            for row in old_rows.scalars().all():
-                await session.delete(row)
-            await session.flush()
-            for idx, slide in enumerate(slides):
-                kwargs = self._slide_dict_to_row_kwargs(idx, slide)
-                session.add(Slide(task_id=task_id, **kwargs))
-
             res = await session.execute(select(Task).where(Task.id == task_id))
             task = res.scalar_one_or_none()
             if task is not None:
@@ -1372,131 +1290,3 @@ class NexusAgentLoop:
                 session.add(task)
 
             await session.commit()
-
-    # ── chart processing ──────────────────────────────────────────────────
-    @staticmethod
-    def _process_charts(
-        slides: list[dict[str, Any]], theme: str
-    ) -> list[dict[str, Any]]:
-        """Run every chart-bearing slide through ``process_chart_data``.
-
-        Mutates each slide in place, attaching a ``chart`` envelope under the
-        key ``slide["chart"]`` (chartjs_config + pptx_config + processed
-        labels/values). Leaves the legacy ``chart_data`` / ``chart_type``
-        fields untouched so the existing renderer keeps working.
-        """
-        for s in slides:
-            if not isinstance(s, dict):
-                continue
-            has_chart = (
-                s.get("layout") == "chart"
-                or "chart_data" in s
-                or "datasets" in s
-                or ("labels" in s and "values" in s)
-            )
-            if not has_chart:
-                continue
-            try:
-                envelope = process_chart_data(s, theme=theme, title=s.get("title"))
-            except Exception as exc:
-                logger.warning("loop.process_chart_failed", extra={"err": str(exc)})
-                envelope = None
-            if envelope:
-                s["chart"] = envelope
-                # Backfill missing legacy fields so downstream renderers that
-                # still read top-level keys keep working.
-                if "chart_type" not in s:
-                    s["chart_type"] = envelope["type"]
-                if "chart_data" not in s:
-                    s["chart_data"] = {
-                        "labels": envelope["labels"],
-                        "values": envelope["values"],
-                        "unit": envelope.get("unit") or "",
-                        "source": envelope.get("source") or "",
-                    }
-        return slides
-
-    # ── slide dict → Slide ORM row ────────────────────────────────────────
-    @staticmethod
-    def _slide_dict_to_row_kwargs(idx: int, slide: dict[str, Any]) -> dict[str, Any]:
-        """Map a generated slide payload onto ``Slide`` column kwargs.
-
-        Splits the payload across:
-        - ``content_json``       — the bulk of the layout-specific body
-        - ``chart_data_json``    — chart fields (when layout=="chart")
-        - ``image_data_json``    — image url/prompt (when present)
-        - ``layout_metadata``    — planner-emitted hints (chart_data_source,
-                                   kpi_refs, table_ref, visual_elements,
-                                   text_density, suggested_layout)
-        """
-        if not isinstance(slide, dict):
-            slide = {}
-        layout = str(slide.get("layout") or "bullets").strip() or "bullets"
-        title = str(slide.get("title") or "").strip()[:512]
-        subtitle_src = (
-            slide.get("subtitle")
-            or slide.get("section")
-            or slide.get("tagline")
-        )
-        subtitle = str(subtitle_src).strip()[:512] if subtitle_src else None
-        speaker_notes = slide.get("speaker_notes")
-        if isinstance(speaker_notes, str):
-            speaker_notes = speaker_notes.strip() or None
-        else:
-            speaker_notes = None
-
-        chart_keys = {"chart_type", "labels", "values", "unit", "source", "datasets"}
-        chart_data: dict[str, Any] | None = None
-        if layout == "chart" or any(k in slide for k in ("labels", "values", "datasets")):
-            picked = {k: slide[k] for k in chart_keys if k in slide}
-            if picked:
-                chart_data = picked
-        # Prefer the processed envelope (with chartjs_config + pptx_config)
-        # when the chart_service has run.
-        envelope = slide.get("chart")
-        if isinstance(envelope, dict):
-            chart_data = {**(chart_data or {}), "envelope": envelope}
-
-        image_data: dict[str, Any] | None = None
-        envelope_img = slide.get("image")
-        if isinstance(envelope_img, dict) and envelope_img.get("url"):
-            image_data = dict(envelope_img)
-        elif slide.get("image_url") or slide.get("image_prompt"):
-            image_data = {
-                "url": slide.get("image_url"),
-                "prompt": slide.get("image_prompt"),
-            }
-
-        meta_keys = (
-            "suggested_layout",
-            "chart_data_source",
-            "kpi_refs",
-            "table_ref",
-            "visual_elements",
-            "text_density",
-            "intent",
-        )
-        layout_meta = {k: slide[k] for k in meta_keys if k in slide}
-        layout_meta = layout_meta or None
-
-        # content_json holds everything else so the editor can round-trip the
-        # full payload without losing layout-specific fields.
-        excluded = (
-            chart_keys
-            | {"image_url", "image_prompt", "image", "speaker_notes", "title",
-               "subtitle", "section", "tagline", "layout", "id", "chart"}
-            | set(meta_keys)
-        )
-        content = {k: v for k, v in slide.items() if k not in excluded}
-
-        return {
-            "slide_number": idx + 1,
-            "slide_type": layout[:32],
-            "title": title,
-            "subtitle": subtitle,
-            "content_json": content or None,
-            "chart_data_json": chart_data,
-            "image_data_json": image_data,
-            "speaker_notes": speaker_notes,
-            "layout_metadata": layout_meta,
-        }

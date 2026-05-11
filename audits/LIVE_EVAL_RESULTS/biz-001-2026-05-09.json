@@ -1,0 +1,44 @@
+{
+  "all_required_layouts_present": true,
+  "category_scores": {
+    "agent_autonomy": null,
+    "deck_correctness": 8,
+    "evidence_accuracy": 7,
+    "export_parity": null,
+    "security_production_readiness": null,
+    "stability_reliability": null,
+    "visual_quality": null
+  },
+  "chart_present": true,
+  "chart_required": false,
+  "chart_requirement_met": true,
+  "deck_quality_invalid_count": 1,
+  "deck_quality_ok": false,
+  "difficulty": "easy",
+  "external_source_expectation_met": true,
+  "fixture_label": null,
+  "generated_slide_count": 8,
+  "kind": "business",
+  "min_sources_required": 0,
+  "needs_external_sources": false,
+  "notes": [
+    "visual_quality: unmeasured offline (requires screenshot diff)",
+    "export_parity: unmeasured per-prompt (covered by Phase 6C content tests)",
+    "agent_autonomy: unmeasured offline (requires runtime telemetry)",
+    "stability/security: measured at gate level, not per prompt"
+  ],
+  "prompt": "Create a 6-slide internal update deck on Q1 sales performance for a B2B SaaS company.",
+  "prompt_id": "biz-001",
+  "ran_live": true,
+  "required_layouts_missing": [],
+  "required_layouts_present": [
+    "bullets",
+    "closing",
+    "stats",
+    "title"
+  ],
+  "schema_version": "1.0",
+  "slide_count_in_window": true,
+  "source_count": 0,
+  "timestamp_utc": "2026-05-09T13:02:39.375994+00:00"
+}

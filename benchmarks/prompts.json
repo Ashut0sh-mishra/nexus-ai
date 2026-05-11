@@ -1,0 +1,226 @@
+{
+  "$schema_version": "1.0",
+  "description": "Realistic deck prompts for offline benchmark evaluation. Each entry stores expected evaluation criteria (what a good deck must demonstrate), NOT expected generated slides. Tests verify metadata integrity only; live LLM evaluation runs are out of scope for Phase 6B.",
+  "version": "2026-05-09",
+  "difficulty_levels": ["easy", "medium", "hard"],
+  "rubric_categories": [
+    "deck_correctness",
+    "visual_quality",
+    "export_parity",
+    "evidence_accuracy",
+    "agent_autonomy",
+    "stability_reliability",
+    "security_production_readiness"
+  ],
+  "prompts": [
+    {
+      "id": "biz-001",
+      "kind": "business",
+      "difficulty": "easy",
+      "prompt": "Create a 6-slide internal update deck on Q1 sales performance for a B2B SaaS company.",
+      "expected_evidence": {
+        "needs_external_sources": false,
+        "min_sources": 0,
+        "claim_level_required": false,
+        "notes": "Internal deck; no external citations required."
+      },
+      "expected_visual": {
+        "required_layouts": ["title", "bullets", "stats", "closing"],
+        "min_slides": 5,
+        "max_slides": 8,
+        "chart_required": false
+      },
+      "primary_categories": ["deck_correctness", "visual_quality"]
+    },
+    {
+      "id": "inv-001",
+      "kind": "investor",
+      "difficulty": "medium",
+      "prompt": "Build a 10-slide seed-stage investor pitch for a vertical AI startup serving legal teams.",
+      "expected_evidence": {
+        "needs_external_sources": true,
+        "min_sources": 2,
+        "claim_level_required": false,
+        "notes": "Market-size and competitor claims should be source-attributed at deck level."
+      },
+      "expected_visual": {
+        "required_layouts": ["title", "bullets", "stats", "two-col", "closing"],
+        "min_slides": 8,
+        "max_slides": 12,
+        "chart_required": true
+      },
+      "primary_categories": ["deck_correctness", "evidence_accuracy", "visual_quality"]
+    },
+    {
+      "id": "edu-001",
+      "kind": "education",
+      "difficulty": "easy",
+      "prompt": "Create a 7-slide intro lecture deck on transformer attention for a graduate ML class.",
+      "expected_evidence": {
+        "needs_external_sources": true,
+        "min_sources": 1,
+        "claim_level_required": false,
+        "notes": "Should cite the original Attention Is All You Need paper at deck level."
+      },
+      "expected_visual": {
+        "required_layouts": ["title", "bullets", "two-col", "quote", "closing"],
+        "min_slides": 6,
+        "max_slides": 9,
+        "chart_required": false
+      },
+      "primary_categories": ["deck_correctness", "evidence_accuracy"]
+    },
+    {
+      "id": "prod-001",
+      "kind": "product_launch",
+      "difficulty": "medium",
+      "prompt": "Generate an 8-slide product launch deck for a new AI document-summarization feature targeting enterprise legal users.",
+      "expected_evidence": {
+        "needs_external_sources": false,
+        "min_sources": 0,
+        "claim_level_required": false,
+        "notes": "Product-internal; market positioning may benefit from optional sources."
+      },
+      "expected_visual": {
+        "required_layouts": ["title", "bullets", "stats", "two-col", "closing"],
+        "min_slides": 7,
+        "max_slides": 10,
+        "chart_required": false
+      },
+      "primary_categories": ["deck_correctness", "visual_quality"]
+    },
+    {
+      "id": "mkt-001",
+      "kind": "market_research",
+      "difficulty": "hard",
+      "prompt": "Produce a 12-slide market research report on the global vector database market 2024-2026.",
+      "expected_evidence": {
+        "needs_external_sources": true,
+        "min_sources": 4,
+        "claim_level_required": true,
+        "notes": "Every quantitative claim should be source-attributed; claim-level citation needed for full score."
+      },
+      "expected_visual": {
+        "required_layouts": ["title", "bullets", "stats", "chart", "two-col", "closing"],
+        "min_slides": 10,
+        "max_slides": 14,
+        "chart_required": true
+      },
+      "primary_categories": ["evidence_accuracy", "agent_autonomy", "deck_correctness"]
+    },
+    {
+      "id": "chart-001",
+      "kind": "chart_heavy",
+      "difficulty": "hard",
+      "prompt": "Create a 9-slide financial review deck with at least three real data charts comparing two fiscal years.",
+      "expected_evidence": {
+        "needs_external_sources": true,
+        "min_sources": 2,
+        "claim_level_required": false,
+        "notes": "Each chart must declare its data source on the chart slide."
+      },
+      "expected_visual": {
+        "required_layouts": ["title", "chart", "stats", "two-col", "closing"],
+        "min_slides": 8,
+        "max_slides": 11,
+        "chart_required": true
+      },
+      "primary_categories": ["deck_correctness", "export_parity", "visual_quality"]
+    },
+    {
+      "id": "evid-001",
+      "kind": "evidence_heavy",
+      "difficulty": "hard",
+      "prompt": "Build a 10-slide policy briefing on EU AI Act compliance obligations for foundation-model providers.",
+      "expected_evidence": {
+        "needs_external_sources": true,
+        "min_sources": 5,
+        "claim_level_required": true,
+        "notes": "Regulatory text claims must be attributable to specific articles; claim-level citation is required for a passing evidence score."
+      },
+      "expected_visual": {
+        "required_layouts": ["title", "bullets", "two-col", "quote", "closing"],
+        "min_slides": 9,
+        "max_slides": 12,
+        "chart_required": false
+      },
+      "primary_categories": ["evidence_accuracy", "agent_autonomy"]
+    },
+    {
+      "id": "story-001",
+      "kind": "visual_storytelling",
+      "difficulty": "medium",
+      "prompt": "Create a 6-slide brand storytelling deck for a consumer wellness app, narrative-driven.",
+      "expected_evidence": {
+        "needs_external_sources": false,
+        "min_sources": 0,
+        "claim_level_required": false,
+        "notes": "Storytelling; sources optional."
+      },
+      "expected_visual": {
+        "required_layouts": ["title", "quote", "two-col", "closing"],
+        "min_slides": 5,
+        "max_slides": 8,
+        "chart_required": false
+      },
+      "primary_categories": ["visual_quality", "deck_correctness"]
+    },
+    {
+      "id": "biz-002",
+      "kind": "business",
+      "difficulty": "medium",
+      "prompt": "Generate an 8-slide quarterly board update for a Series B fintech company including KPI trends.",
+      "expected_evidence": {
+        "needs_external_sources": false,
+        "min_sources": 0,
+        "claim_level_required": false,
+        "notes": "Internal board deck; KPIs are first-party."
+      },
+      "expected_visual": {
+        "required_layouts": ["title", "stats", "chart", "bullets", "closing"],
+        "min_slides": 7,
+        "max_slides": 10,
+        "chart_required": true
+      },
+      "primary_categories": ["deck_correctness", "visual_quality", "export_parity"]
+    },
+    {
+      "id": "edu-002",
+      "kind": "education",
+      "difficulty": "medium",
+      "prompt": "Build an 8-slide technical training deck on zero-trust networking principles.",
+      "expected_evidence": {
+        "needs_external_sources": true,
+        "min_sources": 2,
+        "claim_level_required": false,
+        "notes": "Reference NIST SP 800-207 or equivalent at deck level."
+      },
+      "expected_visual": {
+        "required_layouts": ["title", "bullets", "two-col", "stats", "closing"],
+        "min_slides": 7,
+        "max_slides": 10,
+        "chart_required": false
+      },
+      "primary_categories": ["deck_correctness", "evidence_accuracy"]
+    },
+    {
+      "id": "auto-001",
+      "kind": "agent_autonomy",
+      "difficulty": "hard",
+      "prompt": "Research the current state of open-source agent frameworks and build a 10-slide comparative deck with a feature matrix.",
+      "expected_evidence": {
+        "needs_external_sources": true,
+        "min_sources": 4,
+        "claim_level_required": true,
+        "notes": "Requires browse/search tool autonomy; comparative claims need citations."
+      },
+      "expected_visual": {
+        "required_layouts": ["title", "two-col", "bullets", "stats", "closing"],
+        "min_slides": 9,
+        "max_slides": 12,
+        "chart_required": false
+      },
+      "primary_categories": ["agent_autonomy", "evidence_accuracy", "deck_correctness"]
+    }
+  ]
+}

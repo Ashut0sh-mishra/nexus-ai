@@ -15,14 +15,15 @@ from config import settings
 
 logger = logging.getLogger("nexus.db")
 
-engine = create_async_engine(
-    settings.async_database_url,
-    echo=False,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
-    future=True,
-)
+# SQLite's async driver uses a NullPool that rejects pool_size / max_overflow.
+# Pass the pool sizing kwargs only for real connection-pooled backends
+# (Postgres / MySQL etc.). The production path (postgresql+asyncpg) is unchanged.
+_db_url = settings.async_database_url
+_engine_kwargs: dict = {"echo": False, "future": True}
+if not _db_url.startswith("sqlite"):
+    _engine_kwargs.update(pool_pre_ping=True, pool_size=10, max_overflow=20)
+
+engine = create_async_engine(_db_url, **_engine_kwargs)
 
 SessionLocal = async_sessionmaker(
     engine,

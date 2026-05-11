@@ -2,33 +2,18 @@
  * Normalize raw slide data coming from the backend into a stable shape that
  * `SlideRenderer` can consume regardless of small upstream variations.
  *
- * Accepts both the canonical NEXUS schema and the flatter Manus-style schema
- * the LLM may emit (col1_title/col1_content, top-level labels/values, etc.).
+ * The set of valid layouts is sourced from the canonical layout registry
+ * (`../design/layouts.registry.json`) so this file can never drift from the
+ * backend normalizer or the renderer's layout map.
  */
 
-const VALID_LAYOUTS = new Set([
-  "title",
-  "section",
-  "bullets",
-  "two-col",
-  "comparison",
-  "kpi",
-  "quote",
-  "stats",
-  "chart",
-  "table",
-  "timeline",
-  "image-focus",
-  "closing",
-]);
+import {
+  CANONICAL_LAYOUTS,
+  FALLBACK_LAYOUT,
+  resolveLayoutName,
+} from "../design/registry.js";
 
-function asNumber(v) {
-  if (typeof v === "number") return v;
-  if (v == null) return 0;
-  const cleaned = String(v).replace(/[$,%\s]/g, "");
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? n : 0;
-}
+const VALID_LAYOUTS = new Set(CANONICAL_LAYOUTS);
 
 export function normalizeSlide(raw, index = 0) {
   if (!raw || typeof raw !== "object") {
@@ -39,40 +24,38 @@ export function normalizeSlide(raw, index = 0) {
       subtitle: "",
     };
   }
-  const layout = VALID_LAYOUTS.has(raw.layout) ? raw.layout : "title";
+  // Resolve through the registry so canonical names pass through, future
+  // aliases are honored, and unknowns collapse to FALLBACK_LAYOUT instead
+  // of being silently re-typed as a title slide.
+  const resolved = resolveLayoutName(raw.layout);
+  const layout = VALID_LAYOUTS.has(resolved.canonical)
+    ? resolved.canonical
+    : FALLBACK_LAYOUT;
   const base = {
     id: raw.id || `slide-${index}`,
     layout,
     title: raw.title || "",
     subtitle: raw.subtitle || "",
-    eyebrow: raw.eyebrow || raw.tagline || "",
-    image_url: raw.image_url || "",
+    eyebrow: raw.eyebrow || "",
+    // Phase 5: preserve any source/evidence metadata the backend attached
+    // (Phase 4 fills this for stats / chart / numeric prose slides). The
+    // slide renderer itself ignores this field — it's only consumed by
+    // SourceEvidencePanel.
+    sources: Array.isArray(raw.sources) ? raw.sources : [],
   };
   switch (layout) {
-    case "title":
-      return { ...base, tagline: raw.tagline || "" };
     case "bullets":
+      return { ...base, bullets: Array.isArray(raw.bullets) ? raw.bullets : [] };
+    case "two-col":
       return {
         ...base,
-        section: raw.section || "",
-        bullets: Array.isArray(raw.bullets) ? raw.bullets.slice(0, 4) : [],
+        columns: Array.isArray(raw.columns)
+          ? raw.columns.slice(0, 2).map((c) => ({
+              heading: c?.heading || "",
+              body: c?.body || "",
+            }))
+          : [],
       };
-    case "two-col": {
-      let columns = [];
-      if (Array.isArray(raw.columns) && raw.columns.length) {
-        columns = raw.columns.slice(0, 2).map((c) => ({
-          heading: c?.heading || c?.title || "",
-          body: c?.body || c?.content || "",
-        }));
-      } else {
-        for (const n of [1, 2]) {
-          const heading = raw[`col${n}_title`] || "";
-          const body = raw[`col${n}_content`] || "";
-          if (heading || body) columns.push({ heading, body });
-        }
-      }
-      return { ...base, columns };
-    }
     case "quote":
       return {
         ...base,
@@ -86,114 +69,42 @@ export function normalizeSlide(raw, index = 0) {
           ? raw.stats.slice(0, 3).map((s) => ({
               value: String(s?.value ?? ""),
               label: s?.label || "",
-              trend: s?.trend ? String(s.trend) : "",
             }))
           : [],
       };
     case "chart": {
-      const cd = raw.chart_data && typeof raw.chart_data === "object" ? raw.chart_data : {};
-      const labels = Array.isArray(cd.labels)
-        ? cd.labels
-        : Array.isArray(raw.labels)
-          ? raw.labels
-          : [];
-      const valuesRaw = Array.isArray(cd.values)
-        ? cd.values
-        : Array.isArray(raw.values)
-          ? raw.values
-          : [];
-      const values = valuesRaw.map(asNumber);
-      let chartType = String(raw.chart_type || cd.chart_type || "bar").toLowerCase();
-      if (chartType === "pie") chartType = "doughnut";
-      if (!["bar", "line", "doughnut"].includes(chartType)) chartType = "bar";
+      const cd =
+        raw.chart_data && typeof raw.chart_data === "object"
+          ? raw.chart_data
+          : {};
+      const labels = Array.isArray(cd.labels) ? cd.labels.map(String) : [];
+      const values = Array.isArray(cd.values)
+        ? cd.values.map((v) => {
+            const n = Number(
+              String(v).replace(/,/g, "").replace(/\$/g, "").trim()
+            );
+            return Number.isFinite(n) ? n : 0;
+          })
+        : [];
+      const pairs = Math.min(labels.length, values.length);
+      const chartType = ["bar", "line", "doughnut"].includes(
+        String(raw.chart_type || "bar").toLowerCase()
+      )
+        ? String(raw.chart_type).toLowerCase()
+        : "bar";
       return {
         ...base,
         chart_type: chartType,
         chart_data: {
-          labels: labels.map(String),
-          values,
-          unit: cd.unit || raw.unit || "",
-          source: cd.source || raw.source || "",
+          labels: labels.slice(0, pairs),
+          values: values.slice(0, pairs),
+          unit: cd.unit || "",
+          source: cd.source || "",
         },
       };
     }
-    case "table": {
-      const headers = Array.isArray(raw.headers) ? raw.headers.map(String).slice(0, 6) : [];
-      const rows = Array.isArray(raw.rows)
-        ? raw.rows
-            .slice(0, 8)
-            .map((r) => (Array.isArray(r) ? r.slice(0, 6).map((c) => String(c ?? "")) : []))
-        : [];
-      return { ...base, headers, rows };
-    }
-    case "timeline": {
-      const events = Array.isArray(raw.events)
-        ? raw.events.slice(0, 6).map((e) => ({
-            year: String(e?.year ?? ""),
-            title: e?.title || "",
-            desc: e?.desc || e?.description || "",
-          }))
-        : [];
-      return { ...base, events };
-    }
-    case "image-focus":
-      return {
-        ...base,
-        caption: raw.caption || raw.subtitle || "",
-        image_prompt: raw.image_prompt || "",
-      };
-    case "section":
-      return {
-        ...base,
-        section_number: String(raw.section_number || raw.number || ""),
-      };
-    case "kpi": {
-      const list = Array.isArray(raw.kpis)
-        ? raw.kpis
-        : Array.isArray(raw.stats)
-          ? raw.stats
-          : [];
-      return {
-        ...base,
-        kpis: list.slice(0, 4).map((k) => ({
-          value: String(k?.value ?? ""),
-          label: k?.label || "",
-          sublabel: k?.sublabel || k?.description || "",
-          delta: k?.delta || k?.trend || "",
-          direction: String(k?.direction || "").toLowerCase(),
-        })),
-      };
-    }
-    case "comparison": {
-      let items = [];
-      if (Array.isArray(raw.items) && raw.items.length) {
-        items = raw.items;
-      } else if (Array.isArray(raw.columns)) {
-        items = raw.columns;
-      }
-      const normalized = items.slice(0, 2).map((c) => ({
-        heading: c?.heading || c?.title || "",
-        subtitle: c?.subtitle || c?.tagline || "",
-        points: Array.isArray(c?.points)
-          ? c.points.slice(0, 4).map(String)
-          : Array.isArray(c?.bullets)
-            ? c.bullets.slice(0, 4).map(String)
-            : [],
-        body: c?.body || "",
-      }));
-      return {
-        ...base,
-        items: normalized,
-        divider: raw.divider || "vs",
-      };
-    }
     case "closing":
-      return {
-        ...base,
-        message: raw.message || "",
-        cta: raw.cta || "",
-        tagline: raw.tagline || "",
-      };
+      return { ...base, cta: raw.cta || "" };
     default:
       return base;
   }

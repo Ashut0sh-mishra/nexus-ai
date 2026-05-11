@@ -20,14 +20,17 @@ export function useGenerate() {
 /**
  * Subscribe to the SSE progress stream for a given task. Returns parsed events,
  * the latest status, and any terminal error message.
+ *
+ * Phase 6Q: ``restartKey`` is a numeric nonce; bumping it tears down the
+ * current EventSource and opens a fresh one even when ``taskId`` is
+ * unchanged. The lifecycle ``Retry`` / ``Resume`` buttons use this to
+ * resubscribe after the backend re-enqueues the same task id.
  */
-export function useTaskStream(taskId) {
+export function useTaskStream(taskId, restartKey = 0) {
   const [events, setEvents] = useState([]);
   const [status, setStatus] = useState("pending");
   const [error, setError] = useState(null);
   const [liveSlides, setLiveSlides] = useState([]);
-  const [resolvedTheme, setResolvedTheme] = useState(null);
-  const [analysis, setAnalysis] = useState(null);
   const sourceRef = useRef(null);
 
   useEffect(() => {
@@ -36,8 +39,6 @@ export function useTaskStream(taskId) {
     setStatus("pending");
     setError(null);
     setLiveSlides([]);
-    setResolvedTheme(null);
-    setAnalysis(null);
 
     const es = new EventSource(statusStreamUrl(taskId));
     sourceRef.current = es;
@@ -49,8 +50,13 @@ export function useTaskStream(taskId) {
         if (data.status) setStatus(data.status);
         if (data.error) setError(data.error);
 
-        // Live per-slide stream (browser-use-style step callback adapted to SSE).
-        if (data.event === "slide" && data.slide && typeof data.slide_index === "number") {
+        // Live per-slide stream. Phase 6R uses the canonical event name
+        // ``slide_ready``; legacy ``slide`` is kept for back-compat.
+        if (
+          (data.event === "slide_ready" || data.event === "slide") &&
+          data.slide &&
+          typeof data.slide_index === "number"
+        ) {
           setLiveSlides((prev) => {
             const next = [...prev];
             // Grow the array if a later slide arrives first.
@@ -60,17 +66,16 @@ export function useTaskStream(taskId) {
           });
         }
 
-        // Auto-theme resolution event from the agent loop.
-        if (data.event === "theme" && data.theme) {
-          setResolvedTheme(data.theme);
-        }
-
-        // AI topic-analysis event (topic_type, tone, slide_count, etc.)
-        if (data.event === "analysis" && data.analysis) {
-          setAnalysis(data.analysis);
-        }
-
-        if (data.status === "done" || data.status === "failed") {
+        // Phase 6Q: cancelled is terminal alongside done/failed.
+        // Phase 6R: terminal events also expose canonical event names.
+        if (
+          data.status === "done" ||
+          data.status === "failed" ||
+          data.status === "cancelled" ||
+          data.event === "run_succeeded" ||
+          data.event === "run_failed" ||
+          data.event === "run_cancelled"
+        ) {
           es.close();
         }
       } catch {
@@ -82,7 +87,7 @@ export function useTaskStream(taskId) {
       // Browser will retry; if the server closed cleanly we end up here too.
       // Only flag as error if we never reached a terminal state.
       setStatus((s) => {
-        if (s === "done" || s === "failed") return s;
+        if (s === "done" || s === "failed" || s === "cancelled") return s;
         setError((prev) => prev || "Connection lost. Retrying…");
         return s;
       });
@@ -92,7 +97,7 @@ export function useTaskStream(taskId) {
       es.close();
       sourceRef.current = null;
     };
-  }, [taskId]);
+  }, [taskId, restartKey]);
 
-  return { events, status, error, liveSlides, resolvedTheme, analysis };
+  return { events, status, error, liveSlides };
 }

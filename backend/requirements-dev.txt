@@ -1,0 +1,10 @@
+# Development / test-only dependencies.
+# Install with:  pip install -r requirements.txt -r requirements-dev.txt
+#
+# Production images do NOT install this file. The standard backend Dockerfile
+# only installs requirements.txt; the dev/test image (Dockerfile.dev) layers
+# this on top.
+
+pytest==8.3.3
+pytest-asyncio==0.24.0
+aiosqlite==0.20.0

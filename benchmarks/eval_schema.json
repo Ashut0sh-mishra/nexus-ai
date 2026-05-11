@@ -1,0 +1,40 @@
+{
+  "$schema_version": "1.0",
+  "name": "NEXUS Live-Eval Result Schema",
+  "description": "Schema for a single per-prompt evaluation record produced by backend.services.eval_service.evaluate_deck. Designed to be deterministic and offline-measurable. Per-category scores set to null mean 'not measurable from a deck dict alone' and require an out-of-band measurement (e.g. visual diff, runtime telemetry).",
+  "version": "2026-05-09",
+  "result_record": {
+    "schema_version": "string (echoes $schema_version)",
+    "prompt_id": "string (must match an id in benchmarks/prompts.json)",
+    "prompt": "string (verbatim prompt text)",
+    "kind": "string",
+    "difficulty": "easy|medium|hard",
+    "generated_slide_count": "int",
+    "slide_count_in_window": "bool (min_slides <= n <= max_slides)",
+    "required_layouts_present": "list[string]",
+    "required_layouts_missing": "list[string]",
+    "all_required_layouts_present": "bool",
+    "chart_required": "bool",
+    "chart_present": "bool",
+    "chart_requirement_met": "bool",
+    "source_count": "int (deck-level + per-slide unique)",
+    "needs_external_sources": "bool",
+    "min_sources_required": "int",
+    "external_source_expectation_met": "bool",
+    "deck_quality_ok": "bool|null",
+    "deck_quality_invalid_count": "int|null",
+    "category_scores": {
+      "deck_correctness": "int 1-10 (offline-measurable)",
+      "evidence_accuracy": "int 1-10 (offline-measurable, partial)",
+      "visual_quality": "null (requires screenshot diff)",
+      "export_parity": "null (requires renderer-export contract)",
+      "agent_autonomy": "null (requires runtime telemetry)",
+      "stability_reliability": "null (measured globally, not per prompt)",
+      "security_production_readiness": "null (measured globally, not per prompt)"
+    },
+    "notes": "list[string] (human-readable reasons; includes 'unmeasured' notes for null categories)",
+    "ran_live": "bool (true only if NEXUS_RUN_LIVE_EVAL=true was set and a real generation produced this deck)",
+    "fixture_label": "string|null (set to the fixture name when ran_live=false)",
+    "timestamp_utc": "string ISO-8601 (set by harness; tests may stub)"
+  }
+}

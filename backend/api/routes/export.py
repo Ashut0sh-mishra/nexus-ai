@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.connection import get_db
 from database.models import Export, SlideDeck, Task
 from services.export_service import ExportService
-from agent.theme_picker import resolve_theme
 
 logger = logging.getLogger("nexus.api.export")
 
@@ -50,7 +49,7 @@ async def export_pptx(
     payload: ExportRequest, db: AsyncSession = Depends(get_db)
 ) -> ExportResponse:
     task, deck = await _load_deck(payload.task_id, db)
-    theme = resolve_theme(payload.theme or deck.theme, task.topic)
+    theme = payload.theme or deck.theme
     try:
         url, size = await ExportService().export_pptx(
             task_id=task.id, slides=deck.slide_data or [], theme=theme
@@ -69,7 +68,7 @@ async def export_pdf(
     payload: ExportRequest, db: AsyncSession = Depends(get_db)
 ) -> ExportResponse:
     task, deck = await _load_deck(payload.task_id, db)
-    theme = resolve_theme(payload.theme or deck.theme, task.topic)
+    theme = payload.theme or deck.theme
     try:
         url, size = await ExportService().export_pdf(
             task_id=task.id, slides=deck.slide_data or [], theme=theme

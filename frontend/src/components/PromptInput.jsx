@@ -3,8 +3,11 @@ import { useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 import { ArrowRight, Loader2, Globe, Sparkles } from "lucide-react";
 import { useGenerate } from "../hooks/useGenerate.js";
-import FileUpload from "./FileUpload.jsx";
 
+// "auto" is a Phase 6M sentinel — the backend infers a topic-fitting theme
+// (e.g. "Dossier" for war/conflict prompts, "light-pro" for business pitches)
+// when the form submits with this value. Listed first so it is the default
+// for new visitors who haven't picked a template yet.
 const THEMES = [
   "auto",
   "light-pro",
@@ -41,14 +44,31 @@ export default function PromptInput({ seed = "", mode = DEFAULT_MODE }) {
   const [topic, setTopic] = useState("");
   const [slideCount, setSlideCount] = useState(8);
   const [theme, setTheme] = useState(() => {
+    // Phase 6M-Fix: existing browsers may have ``nexus.preferred-theme``
+    // set to ``light-pro`` or ``Editorial`` from the pre-6M era, when
+    // those values were the form default rather than a deliberate user
+    // choice. Treat both as "no choice yet" and migrate them to the new
+    // ``auto`` sentinel so topic-aware inference kicks in. Any other
+    // stored value (Pixel, Vellum, Dossier, Whiteboard, …) is a real
+    // user preference and is kept as-is.
+    const LEGACY_DEFAULTS = ["light-pro", "Editorial"];
     try {
-      return window.localStorage.getItem("nexus.preferred-theme") || THEMES[0];
+      const stored = window.localStorage.getItem("nexus.preferred-theme");
+      if (!stored) return "auto";
+      if (LEGACY_DEFAULTS.includes(stored)) {
+        try {
+          window.localStorage.setItem("nexus.preferred-theme", "auto");
+        } catch {
+          /* ignore */
+        }
+        return "auto";
+      }
+      return stored;
     } catch {
-      return THEMES[0];
+      return "auto";
     }
   });
   const [searchWeb, setSearchWeb] = useState(true);
-  const [uploadedFiles, setUploadedFiles] = useState([]);
   const { generate, loading } = useGenerate();
   const navigate = useNavigate();
   const isSlidesMode = mode.id === "slides";
@@ -97,19 +117,10 @@ export default function PromptInput({ seed = "", mode = DEFAULT_MODE }) {
 
   const onSubmit = async (e) => {
     e.preventDefault();
-    let t = topic.trim();
-    const hasFiles = uploadedFiles.length > 0;
-    if (t.length < 4 && !hasFiles) {
+    const t = topic.trim();
+    if (t.length < 4) {
       toast.error("Please describe your task in a bit more detail.");
       return;
-    }
-    // If the user only attached files (no/short prompt), synthesize a
-    // neutral instruction so the backend has something to work with. We
-    // intentionally avoid mentioning the filename — the LLM will see the
-    // file's actual contents via context.files and should derive the topic
-    // from those (title, entities, numbers), not from the filename.
-    if (t.length < 4 && hasFiles) {
-      t = "Generate a presentation that summarizes the key information, entities, numbers, and conclusions from the attached file(s). Use the file contents as the source of truth.";
     }
 
     // Slides + Research are wired to the live deck pipeline (Research is
@@ -122,7 +133,6 @@ export default function PromptInput({ seed = "", mode = DEFAULT_MODE }) {
           slide_count: slideCount,
           theme,
           search_web: isResearchMode ? true : searchWeb,
-          file_ids: uploadedFiles.map((f) => f.file_id),
         });
         navigate(`/generate/${task_id}`, { state: { topic: t, theme, slideCount, mode: mode.id } });
       } catch (err) {
@@ -156,7 +166,7 @@ export default function PromptInput({ seed = "", mode = DEFAULT_MODE }) {
             <Sparkles className="h-3 w-3" />
             <span>Template:</span>
             <span className="font-semibold">
-              {theme === "auto" ? "Auto (NEXUS picks)" : theme}
+              {theme === "auto" ? "auto · pick from topic" : theme}
             </span>
             <span className="ml-1 text-[10px] text-accent-purple/70 group-hover:text-accent-purple">
               change ↓
@@ -174,16 +184,6 @@ export default function PromptInput({ seed = "", mode = DEFAULT_MODE }) {
           className="w-full resize-none bg-transparent px-4 py-3 text-base text-nexus-text placeholder-nexus-dim outline-none"
         />
 
-        {(isSlidesMode || isResearchMode) && (
-          <div className="border-t border-nexus-border/60 px-3 py-2">
-            <FileUpload
-              files={uploadedFiles}
-              onChange={setUploadedFiles}
-              disabled={loading}
-            />
-          </div>
-        )}
-
         <div className="flex flex-wrap items-center gap-2 border-t border-nexus-border/60 px-3 py-3">
           {isSlidesMode && (
             <>
@@ -194,7 +194,7 @@ export default function PromptInput({ seed = "", mode = DEFAULT_MODE }) {
               >
                 {THEMES.map((t) => (
                   <option key={t} value={t}>
-                    {t === "auto" ? "Auto (NEXUS picks)" : t}
+                    {t === "auto" ? "auto · pick from topic" : t}
                   </option>
                 ))}
               </select>

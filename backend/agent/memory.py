@@ -73,28 +73,6 @@ class AgentMemory:
         except OSError as exc:
             logger.warning("memory.write_research_failed", extra={"err": str(exc)})
 
-    def write_profile(self, profile: dict[str, Any]) -> None:
-        """Persist the editorial profile (topic_classifier output)."""
-        self._write_json(self.root / "profile.json", profile or {})
-
-    def read_profile(self) -> dict[str, Any]:
-        return self._read_json(self.root / "profile.json", default={})
-
-    def write_artifact(self, name: str, content: str) -> None:
-        """Write an arbitrary text artifact (markdown, json string, etc.).
-
-        Used by the markdown pipeline to expose ``raw_research.md``,
-        ``deck_draft.md``, ``deck_final.md``, and ``sources.json`` so the
-        user can inspect every step the agent took.
-        """
-        try:
-            (self.root / name).write_text(content or "", encoding="utf-8")
-        except OSError as exc:
-            logger.warning(
-                "memory.write_artifact_failed",
-                extra={"name": name, "err": str(exc)},
-            )
-
     def read_research(self) -> str:
         path = self.root / "research.txt"
         if not path.exists():
@@ -106,6 +84,20 @@ class AgentMemory:
 
     def write_slide(self, index: int, slide: dict[str, Any]) -> None:
         self._write_json(self.slides_dir / f"{index:03d}.json", slide)
+
+    def write_artifact(self, name: str, data: Any) -> None:
+        """Persist a generic JSON artifact under the run's memory root.
+
+        Phase 6V uses this for the deck-strategy artifact ("strategy.json")
+        so the strategy is observable alongside ``research.txt``,
+        ``outline.json`` and the per-slide files. ``name`` is treated as
+        a leaf filename: any path separators are stripped to keep writes
+        inside ``self.root``.
+        """
+        safe = (name or "").replace("/", "_").replace("\\", "_").strip()
+        if not safe:
+            return
+        self._write_json(self.root / safe, data)
 
     def read_slides(self) -> list[dict[str, Any]]:
         slides: list[dict[str, Any]] = []

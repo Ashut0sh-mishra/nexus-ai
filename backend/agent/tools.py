@@ -26,9 +26,9 @@ from typing import Any, Awaitable, Callable, Optional
 from config import settings
 from services.search_service import SearchService
 
-try:  # browser-use/playwright are optional
+try:  # playwright is optional
     from services.browser_service import BrowserService  # type: ignore
-    _BROWSER_AVAILABLE = True
+    _BROWSER_AVAILABLE = bool(BrowserService.is_available())
 except Exception as _exc:  # pragma: no cover
     BrowserService = None  # type: ignore
     _BROWSER_AVAILABLE = False

@@ -21,7 +21,9 @@ logger = logging.getLogger("nexus.api.status")
 router = APIRouter()
 
 PROGRESS_CHANNEL_PREFIX = "nexus:task:progress:"
-TERMINAL_STATES = {"done", "failed"}
+# Phase 6Q: ``cancelled`` joins ``done``/``failed`` as a terminal state so
+# the SSE stream closes cleanly when a user cancels.
+TERMINAL_STATES = {"done", "failed", "cancelled"}
 
 
 def channel_for(task_id: str) -> str:
@@ -95,22 +97,7 @@ async def _event_stream(task_id: str) -> AsyncIterator[dict]:
         await client.aclose()
 
 
-@router.get(
-    "/status/{task_id}",
-    summary="Subscribe to a task's progress via Server-Sent Events.",
-    description=(
-        "Streams JSON progress events as the agent loop advances. Each event "
-        "may carry `step`, `pct`, `message`, and a partial `slides` array. The "
-        "stream closes once `status` becomes `done` or `failed`."
-    ),
-    responses={
-        200: {
-            "description": "SSE stream of progress events.",
-            "content": {"text/event-stream": {}},
-        },
-        404: {"description": "Task not found."},
-    },
-)
+@router.get("/status/{task_id}")
 async def task_status_stream(task_id: str):
     snap = await _load_task_snapshot(task_id)
     if snap is None:

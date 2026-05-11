@@ -4,12 +4,8 @@ import react from "@vitejs/plugin-react";
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  // VITE_PROXY_TARGET is used by the dev server only (server-side fetch),
-  // so inside Docker it must be the compose service URL (e.g. http://backend:8000).
-  // VITE_BACKEND_URL is what the browser uses; leave unset to use the relative
-  // "/api" prefix and route through this dev proxy.
-  const backend =
-    env.VITE_PROXY_TARGET || env.VITE_BACKEND_URL || "http://localhost:8080";
+  // Proxy target is server-side only (Node). Do NOT use VITE_ prefix or it leaks to the browser bundle.
+  const backend = env.BACKEND_PROXY_URL || env.VITE_BACKEND_URL || "http://localhost:8080";
   return {
     plugins: [react()],
     server: {

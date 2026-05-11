@@ -1,0 +1,89 @@
+# NEXUS AI — Competitive Benchmark Baseline
+
+**Last updated:** May 9, 2026 — Phase 6G (Reference Intelligence Benchmark)
+
+---
+
+## Benchmark Competitors
+
+| Competitor | Type | Score Estimate | Key Strength |
+|------------|------|---------------|--------------|
+| **Manus** | Commercial | 90+ | Autonomous task completion, polished UX, GAIA benchmark leader |
+| **Presenton** | Open Source | 75-80 | Full presentation product: API, templates, multi-LLM, PPTX/PDF, MCP, desktop app |
+| **PPT Master** | Open Source | 70-75 | Native PPTX quality (real shapes, animations, template replication) |
+| **Suna** | Open Source | 80-85 | Full autonomous agent OS, 60+ skills, sandbox, autowork loop |
+| **OpenManus** | Open Source | 65-70 | Clean planner/executor loop, MCP integration, multi-agent flow |
+| **browser-use** | Open Source | N/A (library) | Browser automation for agents, 60k+ stars |
+| **AgenticSeek** | Open Source | 70-75 | Local agent routing, specialist agents, fully offline |
+| **NEXUS** | Open Source | **~57** | Presentation domain focus, benchmark harness, source evidence panel |
+
+*Note: Competitor scores are directional estimates based on feature analysis, not formal benchmarks.*
+
+---
+
+## NEXUS vs Field: Gap Analysis
+
+### Critical Gaps (Score Impact > 5 points each)
+
+1. **No planner/executor agent loop** — Every serious agent framework (OpenManus, Suna, AgenticSeek) has one. NEXUS runs basic Celery tasks with no planning, step tracking, or retry logic. This is the single largest gap.
+
+2. **No generation API** — Presenton has a full REST API. NEXUS generates slides via UI only. This blocks eval automation, external integration, and MCP exposure.
+
+3. **No multi-LLM provider support** — Presenton supports 6+ providers via env vars. Suna uses LiteLLM for 100+. NEXUS appears hardcoded to one provider.
+
+4. **No template import** — Both Presenton and PPT Master can import any .pptx as a template. NEXUS has only built-in canonical layouts.
+
+5. **Live eval never completed** — The benchmark harness exists but live eval has never run at scale. No proven score. No regression baseline.
+
+### Moderate Gaps (Score Impact 2-4 points each)
+
+6. No browser automation for research/citations
+7. No async job progress streaming
+8. No MCP server or consumer
+9. No cost/token tracking
+10. No visual export parity verification
+
+### Minor Gaps (Score Impact 1-2 points each)
+
+11. No action trace recording
+12. No deterministic replay for benchmarks
+13. No rate limits or quotas
+14. No multi-tenant isolation
+15. No PDF export (status unknown)
+
+---
+
+## What NEXUS Has That Others Don't
+
+| Feature | NEXUS | Presenton | PPT Master | Suna | OpenManus |
+|---------|-------|-----------|------------|------|-----------|
+| Competitive scoring framework | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Benchmark harness with rubric | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Source evidence panel | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Eval schema definition | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Presentation domain specialization | ✅ | ✅ | ✅ | ❌ | ❌ |
+
+NEXUS's unique advantage is its benchmark/eval infrastructure. No competitor has a structured scoring framework. If NEXUS can prove its quality with reproducible benchmarks, that becomes a differentiation even at lower feature counts.
+
+---
+
+## Baseline Measurements
+
+These are the baseline measurements against which all future phases will be compared:
+
+| Metric | Baseline (Phase 6G) | Target (Post Phase 7J) |
+|--------|---------------------|----------------------|
+| Competitive score | ~57/100 | 75-80/100 |
+| Generation API | ❌ None | ✅ /api/generate endpoint |
+| Live eval prompts run | 0 | 11 (full corpus) |
+| LLM providers supported | 1 | 5+ (OpenAI, Anthropic, Google, Ollama, custom) |
+| Templates available | 7 canonical | 7 canonical + importable .pptx |
+| Async job tracking | ❌ None | ✅ Status + SSE progress |
+| Browser automation | ❌ None | ✅ Action trace capture |
+| Audit logs | ❌ None | ✅ Token/cost tracking |
+| MCP exposure | ❌ None | Planned (post 7J) |
+| Backend gate | ✅ Green | ✅ Green (must remain) |
+
+---
+
+*Phase 6G is a roadmap phase. All baselines reflect current implemented state. No score inflation.*

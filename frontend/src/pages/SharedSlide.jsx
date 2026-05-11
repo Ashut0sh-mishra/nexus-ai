@@ -3,11 +3,14 @@ import { useParams } from "react-router-dom";
 import { api } from "../utils/api.js";
 import { normalizeSlides } from "../utils/slideParser.js";
 import SlideCarousel from "../components/SlideCarousel.jsx";
+import DeckQualityBadge from "../components/DeckQualityBadge.jsx";
+import SourceEvidencePanel from "../components/SourceEvidencePanel.jsx";
 
 export default function SharedSlide() {
   const { token } = useParams();
   const [slides, setSlides] = useState(null);
   const [theme, setTheme] = useState("light-pro");
+  const [quality, setQuality] = useState(null);
   const [error, setError] = useState(null);
 
   useEffect(() => {
@@ -18,6 +21,7 @@ export default function SharedSlide() {
         if (cancelled) return;
         setSlides(normalizeSlides(res.data?.slides || []));
         if (res.data?.theme) setTheme(res.data.theme);
+        if (res.data?.deck_quality) setQuality(res.data.deck_quality);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -30,11 +34,12 @@ export default function SharedSlide() {
 
   return (
     <div className="mx-auto max-w-5xl px-6 py-10">
-      <div className="mb-6 flex items-center gap-3 text-xs uppercase tracking-widest text-nexus-muted">
+      <div className="mb-6 flex flex-wrap items-center gap-3 text-xs uppercase tracking-widest text-nexus-muted">
         <span className="rounded-full border border-nexus-border bg-nexus-surface px-2 py-0.5">
           Public preview
         </span>
-        <span className="font-mono normal-case tracking-normal">{token}</span>
+        <span className="break-all font-mono normal-case tracking-normal">{token}</span>
+        {quality && <DeckQualityBadge quality={quality} />}
       </div>
 
       {error && (
@@ -50,7 +55,12 @@ export default function SharedSlide() {
       )}
 
       {!error && Array.isArray(slides) && slides.length > 0 && (
-        <SlideCarousel slides={slides} initialTheme={theme} />
+        <>
+          <SlideCarousel slides={slides} initialTheme={theme} />
+          <div className="mt-4">
+            <SourceEvidencePanel slides={slides} />
+          </div>
+        </>
       )}
     </div>
   );

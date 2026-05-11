@@ -1,18 +1,6 @@
 import { useEffect, useState } from "react";
-import { Check, Sparkles } from "lucide-react";
+import { Check } from "lucide-react";
 import toast from "react-hot-toast";
-
-// "Auto" is a sentinel that the backend resolves to the most fitting theme
-// based on the topic (see backend/agent/theme_picker.py).
-const AUTO = {
-  name: "Auto",
-  theme: "auto",
-  bg: "linear-gradient(135deg,#0EA5E9 0%,#A855F7 50%,#22D3EE 100%)",
-  accent: "#F0ABFC",
-  text: "#FFFFFF",
-  muted: "rgba(255,255,255,0.85)",
-  isAuto: true,
-};
 
 const TEMPLATES = [
   { name: "Light Pro", theme: "light-pro", bg: "#FFFFFF", accent: "#F59E0B", text: "#111827", muted: "#6B7280" },
@@ -56,21 +44,7 @@ function TemplateCard({ t, active, onPick }) {
         className="relative h-32 w-full overflow-hidden"
         style={{ background: t.bg, color: t.text }}
       >
-        {t.isAuto ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center p-3 text-center">
-            <Sparkles className="mb-2 h-6 w-6 text-white drop-shadow" />
-            <div className="text-[10px] uppercase tracking-[0.25em] text-white/90">
-              NEXUS picks
-            </div>
-            <div className="mt-1 font-serif text-[16px] font-semibold leading-tight text-white drop-shadow">
-              Auto theme
-            </div>
-            <div className="mt-1 text-[9px] text-white/85">
-              Best fit for your topic
-            </div>
-          </div>
-        ) : (
-          <div className="absolute inset-0 p-3 flex flex-col justify-between">
+        <div className="absolute inset-0 p-3 flex flex-col justify-between">
           <div
             className="text-[8px] uppercase tracking-[0.2em]"
             style={{ color: t.muted }}
@@ -99,7 +73,6 @@ function TemplateCard({ t, active, onPick }) {
             />
           )}
         </div>
-        )}
       </div>
       <div
         className={`px-3 py-2 text-xs transition ${
@@ -117,9 +90,9 @@ function TemplateCard({ t, active, onPick }) {
 export default function Templates() {
   const [active, setActive] = useState(() => {
     try {
-      return window.localStorage.getItem("nexus.preferred-theme") || "auto";
+      return window.localStorage.getItem("nexus.preferred-theme") || "light-pro";
     } catch {
-      return "auto";
+      return "light-pro";
     }
   });
 
@@ -161,12 +134,6 @@ export default function Templates() {
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-        <TemplateCard
-          key={AUTO.theme}
-          t={AUTO}
-          active={active === AUTO.theme}
-          onPick={onPick}
-        />
         {TEMPLATES.map((t) => (
           <TemplateCard
             key={t.theme}

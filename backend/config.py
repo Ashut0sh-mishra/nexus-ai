@@ -62,13 +62,61 @@ class Settings(BaseSettings):
     UNFILTERED_BASE_URL: str = "https://api.unfiltered.ai/v1"
     UNFILTERED_MODEL: str = "gpt-4o"
 
+    # ── Priority-1 free / low-cost providers (Phase 6W) ───────────────────
+    # Cerebras inference (fast Llama 3.3 70B, OpenAI-compatible).
+    CEREBRAS_API_KEY: str = ""
+    CEREBRAS_BASE_URL: str = "https://api.cerebras.ai/v1"
+    CEREBRAS_MODEL: str = "qwen-3-235b-a22b-instruct-2507"
+
+    # SambaNova Cloud (free tier; OpenAI-compatible).
+    SAMBANOVA_API_KEY: str = ""
+    SAMBANOVA_BASE_URL: str = "https://api.sambanova.ai/v1"
+    SAMBANOVA_MODEL: str = "Meta-Llama-3.3-70B-Instruct"
+
+    # Mistral AI (low-cost; OpenAI-compatible).
+    MISTRAL_API_KEY: str = ""
+    MISTRAL_BASE_URL: str = "https://api.mistral.ai/v1"
+    MISTRAL_MODEL: str = "mistral-small-latest"
+
+    # GitHub Models (free tier via Azure inference; OpenAI-compatible).
+    GITHUB_MODELS_API_KEY: str = ""
+    GITHUB_MODELS_BASE_URL: str = "https://models.inference.ai.azure.com"
+    GITHUB_MODELS_MODEL: str = "gpt-4o-mini"
+
+    # ── Token / context pruning ───────────────────────────────────────────
+    MAX_CONTEXT_TOKENS: int = 6000
+    KEEP_LAST_MESSAGES: int = 5
+
     # Order of providers to try. Override via env to disable any tier.
-    AI_PROVIDER_CHAIN: str = "groq,gemini,openrouter,nvidia_nim,anthropic,openai"
+    # Phase 6W-stable: only providers with verified-working credentials
+    # are listed by default. Gemini / OpenRouter / Cerebras are supported
+    # but excluded due to free-tier 429 risk; Mistral / GitHub Models are
+    # supported but excluded until valid inference credentials exist.
+    # All 10 providers remain visible in /api/health.
+    AI_PROVIDER_CHAIN: str = "groq,nvidia_nim,sambanova"
 
     # ── SEARCH & BROWSER ───────────────────────
     TAVILY_API_KEY: str = ""
     SERPER_API_KEY: str = ""
     BROWSERLESS_API_KEY: str = ""
+
+    # Phase 6I — runtime-driven /api/generate (feature flag, default OFF).
+    # When false, /api/generate behaves exactly as before. When true, the
+    # route additionally persists an AgentRun + AgentStep dispatch trail
+    # (still enqueueing Celery; the runtime does not yet execute the
+    # generation pipeline). See audits/REFERENCE_INTELLIGENCE_BLUEPRINT.md
+    # § Phase 6I.
+    NEXUS_RUNTIME_DRIVES_GENERATE: bool = False
+
+    # Browser automation (Playwright). Disabled by default so CI/local
+    # baseline stays stable. Enable with BROWSER_ENABLED=true once Chromium
+    # has been installed via `python -m playwright install chromium`.
+    BROWSER_ENABLED: bool = False
+    BROWSER_HEADLESS: bool = True
+    BROWSER_TIMEOUT_MS: int = 10000
+    BROWSER_NAV_TIMEOUT_MS: int = 30000
+    BROWSER_VIEWPORT_WIDTH: int = 1280
+    BROWSER_VIEWPORT_HEIGHT: int = 720
 
     # ── DATABASE ───────────────────────────────
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/nexus"
@@ -105,37 +153,10 @@ class Settings(BaseSettings):
     STRIPE_SECRET_KEY: str = ""
     STRIPE_WEBHOOK_SECRET: str = ""
 
-    # ── UPLOADS ────────────────────────────────
-    MAX_UPLOAD_SIZE_MB: int = 25
-    ALLOWED_UPLOAD_EXTENSIONS: str = "csv,xlsx,xls,json,pdf,docx,pptx,txt,md"
-
-    # ── STOCK IMAGES (optional) ─────────────────
-    UNSPLASH_ACCESS_KEY: str = ""
-    PEXELS_API_KEY: str = ""
-
     # ── INTERNAL ───────────────────────────────
     STORAGE_DIR: Path = Field(default=BACKEND_DIR / "storage")
     EXPORT_DIR: Path = Field(default=BACKEND_DIR / "storage" / "exports")
-    UPLOAD_DIR: Path = Field(default=BACKEND_DIR / "storage" / "uploads")
-    ASSET_DIR: Path = Field(default=BACKEND_DIR / "storage" / "assets")
     MEMORY_DIR: Path = Field(default=BACKEND_DIR / ".memory")
-
-    # ── PIPELINE FEATURE FLAGS ─────────────────
-    # Use the markdown-first pipeline (research \u2192 draft.md \u2192 refine.md \u2192 slides)
-    # mirroring Manus's observed workflow. Falls back to the legacy
-    # JSON-only pipeline if disabled or if the markdown step fails.
-    USE_MARKDOWN_PIPELINE: bool = True
-
-    # "shallow" = single search call (legacy). "deep" = multi-hop: fetch top
-    # pages, extract entities, run a follow-up search. Used by the markdown
-    # pipeline researcher when the topic profile is history/research/explainer.
-    RESEARCH_DEPTH: str = "deep"
-
-    # Two-model strategy. WRITING_MODEL is used for slide content; if the
-    # configured provider has no API key, we silently fall back to the chain
-    # in `claude_service.py`. CHEAP_MODEL is used everywhere else.
-    WRITING_MODEL_PROVIDER: str = "auto"  # auto|anthropic|openai|gemini|openrouter|nvidia|groq
-    WRITING_MODEL_NAME: str = ""  # empty = pick the provider's strongest default
 
     @field_validator("DATABASE_URL")
     @classmethod
@@ -154,6 +175,26 @@ class Settings(BaseSettings):
     @property
     def active_anthropic_model(self) -> str:
         return self.ANTHROPIC_MODEL_DEV if self.is_dev else self.ANTHROPIC_MODEL_PROD
+
+    # Phase 6W — role-based model routing. Maps a generation role to a
+    # (provider, model) pair. ``complete_for_role`` consults this map first
+    # and falls back to the normal provider_chain on failure or missing key.
+    @property
+    def ROLE_MODEL_MAP(self) -> dict[str, tuple[str, str]]:
+        # Phase 6W-stable: every role is pinned to a provider whose key is
+        # currently verified-working (groq / nvidia_nim / sambanova). The
+        # other 7 providers remain wired in code and visible in /api/health
+        # but are not routed to until their credentials are operational.
+        return {
+            "planner":   ("sambanova",  self.SAMBANOVA_MODEL),
+            "writer":    ("groq",       self.GROQ_MODEL),
+            "critic":    ("nvidia_nim", self.NVIDIA_NIM_MODEL),
+            "research":  ("sambanova",  self.SAMBANOVA_MODEL),
+            "vision":    ("groq",       self.GROQ_MODEL),
+            "repair":    ("nvidia_nim", self.NVIDIA_NIM_MODEL),
+            "summarize": ("sambanova",  self.SAMBANOVA_MODEL),
+            "json_fix":  ("groq",       self.GROQ_MODEL),
+        }
 
     @property
     def provider_chain(self) -> list[str]:
@@ -200,20 +241,8 @@ class Settings(BaseSettings):
         return url
 
     def ensure_directories(self) -> None:
-        for d in (self.STORAGE_DIR, self.EXPORT_DIR, self.UPLOAD_DIR, self.ASSET_DIR, self.MEMORY_DIR):
+        for d in (self.STORAGE_DIR, self.EXPORT_DIR, self.MEMORY_DIR):
             d.mkdir(parents=True, exist_ok=True)
-
-    @property
-    def allowed_upload_extensions(self) -> set[str]:
-        return {
-            e.strip().lower().lstrip(".")
-            for e in self.ALLOWED_UPLOAD_EXTENSIONS.split(",")
-            if e.strip()
-        }
-
-    @property
-    def max_upload_bytes(self) -> int:
-        return max(1, int(self.MAX_UPLOAD_SIZE_MB)) * 1024 * 1024
 
     def assert_required_for_runtime(self) -> None:
         """Fail fast on startup if no AI provider key is configured."""
@@ -224,12 +253,18 @@ class Settings(BaseSettings):
             self.GROQ_API_KEY,
             self.ANTHROPIC_API_KEY,
             self.OPENAI_API_KEY,
+            self.CEREBRAS_API_KEY,
+            self.SAMBANOVA_API_KEY,
+            self.MISTRAL_API_KEY,
+            self.GITHUB_MODELS_API_KEY,
         )
         if not any(keys):
             raise RuntimeError(
                 "No AI provider configured. Set at least one of: "
                 "OPENROUTER_API_KEY, NVIDIA_NIM_API_KEY, GEMINI_API_KEY, "
-                "GROQ_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY in .env"
+                "GROQ_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, "
+                "CEREBRAS_API_KEY, SAMBANOVA_API_KEY, MISTRAL_API_KEY, "
+                "GITHUB_MODELS_API_KEY in .env"
             )
         if self.jwt_secret in ("", "change-me-in-production") and self.is_prod:
             raise RuntimeError(

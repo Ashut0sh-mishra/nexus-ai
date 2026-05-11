@@ -1,0 +1,140 @@
+{
+  "$schema_version": "1.0",
+  "name": "NEXUS Competitive Benchmark Rubric",
+  "description": "Weighted scoring rubric to compare NEXUS AI against Manus, browser-use, OpenManus, AgenticSeek, Presenton, and Gamma/Tome-style presentation tools. Scores are 1-10 per category. Weighted_total = sum(weight * score) / 10. Maximum weighted_total = 100.",
+  "version": "2026-05-09",
+  "scale": {
+    "min": 1,
+    "max": 10,
+    "passing": 7,
+    "target": 8
+  },
+  "weights": {
+    "deck_correctness": 20,
+    "visual_quality": 15,
+    "export_parity": 15,
+    "evidence_accuracy": 15,
+    "agent_autonomy": 15,
+    "stability_reliability": 10,
+    "security_production_readiness": 10
+  },
+  "categories": [
+    {
+      "id": "deck_correctness",
+      "weight": 20,
+      "description": "Generated decks conform to the canonical 7-layout schema with valid normalized payloads and pass deck_quality checks.",
+      "audit_open_risk": "schema/layout correctness",
+      "evidence_required": [
+        "test_layout_coverage passes 7/7",
+        "test_slide_schema passes",
+        "test_deck_quality passes",
+        "live generation pinned to canonical layouts only"
+      ]
+    },
+    {
+      "id": "visual_quality",
+      "weight": 15,
+      "description": "Typography, spacing, hierarchy, premium feel for all 7 layouts on web and exports.",
+      "audit_open_risk": "visual quality",
+      "evidence_required": [
+        "VISUAL_QUALITY_AUDIT.md scoring",
+        "screenshot diff suite (does not exist yet)"
+      ]
+    },
+    {
+      "id": "export_parity",
+      "weight": 15,
+      "description": "PPTX and PDF exports preserve layout, content, and ordering relative to the on-screen renderer.",
+      "audit_open_risk": "export parity",
+      "evidence_required": [
+        "test_export_input_parity passes",
+        "renderer\u2194export contract test (does not exist yet)"
+      ]
+    },
+    {
+      "id": "evidence_accuracy",
+      "weight": 15,
+      "description": "Source/citation grounding correctness: deck-level and slide-level today; claim-level required for full score.",
+      "audit_open_risk": "evidence/citation accuracy",
+      "evidence_required": [
+        "test_source_grounding passes",
+        "test_phase4_attach_sources passes",
+        "claim-level citation mapping (does not exist yet)",
+        "live source-fact-check eval (does not exist yet)"
+      ]
+    },
+    {
+      "id": "agent_autonomy",
+      "weight": 15,
+      "description": "Tool-calling runtime can plan, browse, search, and execute steps end-to-end with safety guardrails.",
+      "audit_open_risk": "browser/tool autonomy",
+      "evidence_required": [
+        "test_agent_runtime passes",
+        "test_agent_route passes (authenticated)",
+        "test_browser_service passes",
+        "live browser-use parity eval (does not exist yet)"
+      ]
+    },
+    {
+      "id": "stability_reliability",
+      "weight": 10,
+      "description": "Backend tests green, migrations reversible, no flaky behavior across runs.",
+      "audit_open_risk": "runtime reliability",
+      "evidence_required": [
+        "default pytest green",
+        "alembic upgrade/downgrade reversible",
+        "no flaky tests across 3 consecutive runs (not yet measured)"
+      ]
+    },
+    {
+      "id": "security_production_readiness",
+      "weight": 10,
+      "description": "Auth on internal routes, rate limits, per-user quotas, secrets management, audit logging.",
+      "audit_open_risk": "security/production readiness",
+      "evidence_required": [
+        "Bearer JWT on /api/agent/test-run (Phase 6A)",
+        "rate limits (does not exist yet)",
+        "per-user quotas (does not exist yet)",
+        "SSE step streaming (does not exist yet)"
+      ]
+    }
+  ],
+  "competitors": [
+    {
+      "id": "manus",
+      "label": "Manus (target)",
+      "kind": "target",
+      "notes": "Reference for end-to-end autonomous agent + deck-quality user experience."
+    },
+    {
+      "id": "browser_use",
+      "label": "browser-use",
+      "kind": "open_source_reference",
+      "notes": "Reference for browser tool autonomy and DOM-action accuracy."
+    },
+    {
+      "id": "openmanus",
+      "label": "OpenManus",
+      "kind": "open_source_reference",
+      "notes": "Reference for general-purpose tool-calling agent loop architecture."
+    },
+    {
+      "id": "agenticseek",
+      "label": "AgenticSeek",
+      "kind": "open_source_reference",
+      "notes": "Reference for retrieval/evidence-grounded agent reasoning."
+    },
+    {
+      "id": "gamma_tome",
+      "label": "Gamma / Tome",
+      "kind": "presentation_tool_reference",
+      "notes": "Reference for visual quality, layout breadth, and export polish."
+    },
+    {
+      "id": "presenton",
+      "label": "Presenton",
+      "kind": "presentation_tool_reference",
+      "notes": "Open-source (Apache 2.0) presentation generator with FastAPI + Next.js + Electron desktop, BYOK across OpenAI/Anthropic/Google/Ollama, SSE slide streaming, async-with-status generation, PPTX/PDF ingestion, MCP server, and ~100 backend tests. Stronger than NEXUS today on import surface, provider breadth, async/SSE, MCP, and test count; weaker reference for live AI-accuracy or pixel-visual measurement (no pixel-diff visual regression)."
+    }
+  ]
+}

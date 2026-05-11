@@ -1,0 +1,16 @@
+# Dev/test variant of the backend image.
+# Adds pytest stack on top of the production image without bloating prod.
+#
+# Build:  docker build -f backend/Dockerfile.dev -t nexus-ai-backend:dev backend
+# Run:    docker run --rm -v "<repo>/backend:/app" -w /app -e PYTHONPATH=/app \
+#           -e DATABASE_URL=sqlite+aiosqlite:///:memory: \
+#           nexus-ai-backend:dev python -m pytest -q
+
+# Re-use the production image as base. Build the prod image first
+# (`docker build -t nexus-ai-backend:latest backend`).
+FROM nexus-ai-backend:latest
+
+COPY requirements-dev.txt /app/requirements-dev.txt
+RUN pip install --no-cache-dir -r /app/requirements-dev.txt
+
+CMD ["python", "-m", "pytest", "-q"]

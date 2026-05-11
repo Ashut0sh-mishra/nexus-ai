@@ -2,14 +2,13 @@
 
 Production-grade AI slide generator — same stack as Manus AI.
 
-- **Frontend** — React 18 + Vite + Tailwind, central design system, 23-layout slide renderer
+- **Frontend** — React 18 + Vite + Tailwind (Manus-style dark UI)
 - **Backend** — FastAPI + Celery + PostgreSQL + Redis
-- **AI** — multi-provider chain (OpenRouter → NVIDIA NIM → Gemini → Groq → Anthropic → OpenAI), free tiers first
-- **Search** — Tavily (primary) + Serper (fallback) — optional
-- **Browser** — `browser-use` + Playwright (CodeAct sandbox)
+- **AI** — Claude `claude-sonnet-4-6` (prod) / `claude-opus-4-7` (dev)
+- **Search** — Tavily (primary) + Serper (fallback)
+- **Browser** — Playwright (Chromium, opt-in via `BROWSER_ENABLED=true`)
 - **Storage** — Cloudflare R2 (with local fallback)
 - **Auth** — JWT + Google OAuth
-- **Layouts** — single source of truth in [`frontend/src/design/layouts.registry.json`](frontend/src/design/layouts.registry.json), shared by frontend renderer, backend planner, and PPTX exporter; CI fails on drift
 
 ---
 
@@ -23,18 +22,13 @@ cd nexus
 cp .env.example .env
 ```
 
-Edit `.env` and fill in **at least one** AI provider key (free tiers first):
+Edit `.env` and fill in at minimum:
 
-| key | tier | where |
+| key | required | where |
 | --- | --- | --- |
-| `OPENROUTER_API_KEY` | free | <https://openrouter.ai/keys> (Kimi K2) |
-| `GEMINI_API_KEY` | free 1000/day | <https://aistudio.google.com/apikey> |
-| `GROQ_API_KEY` | free | <https://console.groq.com/keys> |
-| `NVIDIA_NIM_API_KEY` | free | <https://build.nvidia.com> |
-| `ANTHROPIC_API_KEY` | paid fallback | <https://console.anthropic.com/settings/keys> |
-| `OPENAI_API_KEY` | paid fallback | <https://platform.openai.com/api-keys> |
-| `JWT_SECRET` | required | `python -c "import secrets; print(secrets.token_hex(32))"` |
-| `TAVILY_API_KEY` | optional | <https://app.tavily.com> (research step is skipped without it) |
+| `ANTHROPIC_API_KEY` | ✅ yes | console.anthropic.com/settings/keys |
+| `SECRET_KEY` | ✅ yes | `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `TAVILY_API_KEY` | optional | app.tavily.com (research step is skipped without it) |
 | everything else | optional | only needed for production deploys |
 
 ### 2. One-command boot (Docker)
@@ -111,21 +105,9 @@ npm run dev
 
 Each step pushes an SSE event with progress `%` and message.
 
-### Slide layouts (23 canonical)
+### Slide layouts (6)
 
-`title`, `section`, `bullets`, `two-col`, `comparison`, `kpi`, `quote`, `stats`, `chart`, `table`, `timeline`, `image-focus`, `closing`, `hero`, `bento`, `agenda`, `roadmap`, `metric-spotlight`, `process`, `pyramid`, `matrix-2x2`, `feature-grid`, `callout`.
-
-40+ aliases (e.g. `kpis` → `kpi`, `vs` → `comparison`, `cards` → `bento`) are defined in `frontend/src/design/layouts.registry.json`. Backend planner and frontend renderer share the file. CI script `node scripts/verify-layouts.mjs` fails the build if backend/frontend/exporter drift apart.
-
-### Quality gates
-
-```bash
-cd frontend
-npm run verify:layouts   # backend/frontend layout parity (fast, no browser)
-npm run build            # production build
-npm run test:gallery     # Playwright: 23 per-layout snapshots + zero-warning + alias coverage
-npm run test:ci          # all of the above
-```
+`title`, `bullets`, `two-col`, `quote`, `stats`, `closing`.
 
 ### API
 
@@ -171,3 +153,44 @@ nexus/
 - Configure Cloudflare R2 to enable cloud-hosted exports (otherwise files live in `backend/storage/`).
 - Set `SENTRY_DSN` for error tracking.
 - Run Alembic migrations on deploy: `alembic upgrade head`.
+
+---
+
+## Workspace & test commands (truthful)
+
+This folder is `D:\nexus-ai-1\nexus-ai`. A sibling clone at `D:\nexus-ai-gh`
+or similar uses a different Docker Compose project name and will NOT see
+edits made here. To verify which workspace your containers belong to:
+
+```powershell
+pwsh ./scripts/doctor.ps1
+```
+
+The compose project is pinned to `nexus-ai-1` via the top-level `name:` key in
+`docker-compose.yml`.
+
+### Backend tests
+
+```powershell
+pwsh ./scripts/test-backend.ps1
+```
+
+Builds `nexus-ai-backend:latest` and `nexus-ai-backend:dev` if missing, then
+runs `pytest -q` against the local `backend/` mount with an in-memory SQLite
+database. Dev-only deps live in `backend/requirements-dev.txt` and are NOT
+installed in the production image.
+
+### Frontend layout verification
+
+```powershell
+cd frontend
+npm run verify:layouts
+```
+
+### Frontend build
+
+```powershell
+cd frontend
+npm run build
+```
+

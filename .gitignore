@@ -1,10 +1,7 @@
 # ── env / secrets ─────────
-# NOTE: .env is intentionally tracked while this repo is PRIVATE so the dev
-# can clone & run on multiple laptops. If you ever flip this repo to PUBLIC,
-# remove .env from tracking, rotate every key, and uncomment the lines below.
-# .env
-# .env.local
-# .env.*.local
+.env
+.env.local
+.env.*.local
 *.pem
 *.key
 
@@ -38,19 +35,13 @@ Thumbs.db
 backend/storage/
 backend/exports/
 backend/.memory/
-backend/.cache/
 backend/celerybeat-schedule*
 *.sqlite3
 *.db
 
-# ── playwright artifacts (reports/results, keep snapshots) ──
-frontend/test-results/
-frontend/playwright-report/
-
 # ── docker ───────────────
 docker-data/
 
-# ── reference material (not part of the product) ──
-manus-need/
+# -- large local-only archives (kept outside git) -
 manus-need.zip
-manus-reference/
+

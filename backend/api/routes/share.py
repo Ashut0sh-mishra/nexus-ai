@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database.connection import get_db
 from database.models import ShareToken, SlideDeck, Task
+from agent.deck_quality import attach_quality_report
 
 logger = logging.getLogger("nexus.api.share")
 
@@ -61,11 +62,7 @@ async def view_share(token: str, db: AsyncSession = Depends(get_db)) -> dict:
     share = res.scalar_one_or_none()
     if share is None:
         raise HTTPException(status_code=404, detail="Share link not found")
-    # SQLite returns naive datetimes; treat them as UTC for comparison.
-    expires = share.expires_at
-    if expires is not None and expires.tzinfo is None:
-        expires = expires.replace(tzinfo=timezone.utc)
-    if expires is not None and expires < datetime.now(timezone.utc):
+    if share.expires_at and share.expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=410, detail="Share link expired")
 
     deck_res = await db.execute(select(SlideDeck).where(SlideDeck.task_id == share.task_id))
@@ -79,11 +76,15 @@ async def view_share(token: str, db: AsyncSession = Depends(get_db)) -> dict:
     db.add(share)
     await db.commit()
 
-    return {
+    deck_data = deck.slide_data or []
+    payload = {
         "topic": task.topic,
         "theme": deck.theme,
         "slide_count": deck.slide_count,
-        "slides": deck.slide_data or [],
+        "slides": deck_data,
         "created_at": deck.created_at,
         "views": share.views,
     }
+    # Phase 1D: surface the non-destructive DeckQualityReport on the
+    # response. Computed on read; not persisted; backward-compatible.
+    return attach_quality_report(payload, deck_data)

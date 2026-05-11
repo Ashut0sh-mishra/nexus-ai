@@ -1,52 +1,51 @@
-import { Link } from "react-router-dom";
 import { Sparkles, Github, Twitter } from "lucide-react";
 
 const COLUMNS = [
   {
     heading: "Product",
     links: [
-      { label: "AI slides", href: "/#templates" },
-      { label: "AI design", href: "/#templates" },
-      { label: "Live research", href: "/#features" },
-      { label: "Pricing", href: "/#features" },
-      { label: "Changelog", href: "https://github.com/nexus-ai/nexus/releases", external: true },
+      { label: "AI slides", href: "#templates" },
+      { label: "AI design", href: "#templates" },
+      { label: "Live research", href: "#features" },
+      { label: "Pricing", href: "#pricing" },
+      { label: "Changelog", href: "#features" },
     ],
   },
   {
     heading: "Resources",
     links: [
-      { label: "Docs", href: "/#features" },
-      { label: "Blog", href: "https://github.com/nexus-ai/nexus/discussions", external: true },
-      { label: "Help center", href: "mailto:hello@nexus.ai" },
-      { label: "API", href: "/#features" },
-      { label: "Playbook", href: "/#templates" },
+      { label: "Docs", href: "#features" },
+      { label: "Blog", href: "#features" },
+      { label: "Help center", href: "#features" },
+      { label: "API", href: "#features" },
+      { label: "Playbook", href: "#features" },
     ],
   },
   {
     heading: "Compare",
     links: [
-      { label: "vs ChatGPT", href: "https://chat.openai.com", external: true },
-      { label: "vs Manus", href: "https://manus.im", external: true },
-      { label: "vs Gamma", href: "https://gamma.app", external: true },
-      { label: "vs Beautiful.ai", href: "https://www.beautiful.ai", external: true },
+      { label: "vs ChatGPT", href: "#features" },
+      { label: "vs Manus", href: "#features" },
+      { label: "vs Gamma", href: "#features" },
+      { label: "vs Beautiful.ai", href: "#features" },
     ],
   },
   {
     heading: "Download",
     links: [
-      { label: "Web app", href: "/", route: true },
-      { label: "Desktop", href: "/#features" },
-      { label: "Mobile", href: "/#features" },
-      { label: "VS Code", href: "https://marketplace.visualstudio.com", external: true },
+      { label: "Web app", href: "/" },
+      { label: "Desktop", href: "#features" },
+      { label: "Mobile", href: "#features" },
+      { label: "VS Code", href: "#features" },
     ],
   },
   {
     heading: "Company",
     links: [
-      { label: "About", href: "/#features" },
-      { label: "Careers", href: "mailto:careers@nexus.ai" },
-      { label: "Privacy", href: "/#features" },
-      { label: "Terms", href: "/#features" },
+      { label: "About", href: "#features" },
+      { label: "Careers", href: "#features" },
+      { label: "Privacy", href: "#features" },
+      { label: "Terms", href: "#features" },
       { label: "Contact", href: "mailto:hello@nexus.ai" },
     ],
   },
@@ -97,26 +96,16 @@ export default function Footer() {
                 {col.heading}
               </h4>
               <ul className="space-y-2 text-sm text-nexus-muted">
-                {col.links.map((l) => {
-                  const cls = "transition hover:text-nexus-text";
-                  let node;
-                  if (l.external) {
-                    node = (
-                      <a href={l.href} target="_blank" rel="noreferrer" className={cls}>
-                        {l.label}
-                      </a>
-                    );
-                  } else if (l.route) {
-                    node = <Link to={l.href} className={cls}>{l.label}</Link>;
-                  } else if (l.href.startsWith("mailto:")) {
-                    node = <a href={l.href} className={cls}>{l.label}</a>;
-                  } else {
-                    // In-page anchor like "/#features" — use plain <a> so the
-                    // browser handles scroll-to-id natively.
-                    node = <a href={l.href} className={cls}>{l.label}</a>;
-                  }
-                  return <li key={l.label}>{node}</li>;
-                })}
+                {col.links.map((l) => (
+                  <li key={l.label}>
+                    <a
+                      href={l.href}
+                      className="transition hover:text-nexus-text"
+                    >
+                      {l.label}
+                    </a>
+                  </li>
+                ))}
               </ul>
             </div>
           ))}

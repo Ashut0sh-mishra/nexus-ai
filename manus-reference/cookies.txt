@@ -1,0 +1,4 @@
+# HTTrack Website Copier Cookie File
+# This file format is compatible with Netscape cookies
+help.manus.im	TRUE	/	FALSE	1999999999	recent_write	41c76a62-8717-4503-9ffe-13639e320811
+

@@ -1,26 +1,9 @@
-import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
+import { Link, NavLink } from "react-router-dom";
 import { Sparkles, Moon, Sun } from "lucide-react";
 import { useUITheme } from "../hooks/useUITheme.js";
 
 export default function Navbar() {
   const { mode, toggle } = useUITheme();
-  const { pathname } = useLocation();
-  const navigate = useNavigate();
-
-  // When the user is NOT on Home, "Features"/"Templates" must first navigate
-  // to "/" and then scroll to the anchor; a bare <a href="#features"> on
-  // /settings would just set the hash on /settings and do nothing visible.
-  const goToAnchor = (e, hash) => {
-    e.preventDefault();
-    if (pathname === "/") {
-      const el = document.getElementById(hash);
-      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-      else window.location.hash = hash;
-    } else {
-      navigate(`/#${hash}`);
-    }
-  };
-
   return (
     <header className="sticky top-0 z-40 border-b border-nexus-border/60 bg-nexus-bg/70 backdrop-blur-xl">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
@@ -32,7 +15,7 @@ export default function Navbar() {
         </Link>
 
         <nav className="hidden items-center gap-7 text-sm text-nexus-muted md:flex">
-          <NavLink to="/" end className="hover:text-nexus-text transition">
+          <NavLink to="/" className="hover:text-nexus-text transition">
             Home
           </NavLink>
           <a
@@ -43,26 +26,12 @@ export default function Navbar() {
           >
             Docs
           </a>
-          <a
-            href="/#features"
-            onClick={(e) => goToAnchor(e, "features")}
-            className="hover:text-nexus-text transition"
-          >
+          <a href="#features" className="hover:text-nexus-text transition">
             Features
           </a>
-          <a
-            href="/#templates"
-            onClick={(e) => goToAnchor(e, "templates")}
-            className="hover:text-nexus-text transition"
-          >
+          <a href="#templates" className="hover:text-nexus-text transition">
             Templates
           </a>
-          <NavLink to="/gallery" className="hover:text-nexus-text transition">
-            Gallery
-          </NavLink>
-          <NavLink to="/settings" className="hover:text-nexus-text transition">
-            Settings
-          </NavLink>
         </nav>
 
         <div className="flex items-center gap-3">

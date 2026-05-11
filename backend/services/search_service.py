@@ -59,6 +59,90 @@ class SearchService:
         logger.info("search.no_results")
         return "", []
 
+    # ── Phase 6U: multi-query harvest until min_sources reached ──────────
+
+    async def harvest(
+        self,
+        query: str,
+        *,
+        target_min: int = 0,
+        max_total: int = 12,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Harvest sources across follow-up queries until ``target_min`` is met.
+
+        The first call uses the verbatim ``query``. If the harvest is
+        still under ``target_min`` after that, follow-up queries derived
+        from the topic ("<query> 2024", "<query> overview", etc.) are
+        issued. Results are deduplicated by ``url``.
+
+        Behaviour:
+        * Always returns whatever it has, even if ``target_min`` is not
+          met (callers must not assume ``min_sources`` is satisfied).
+        * Each follow-up reuses the same backend chain as :meth:`search`.
+        * Caps the number of follow-up queries at 3 to keep latency
+          bounded; total result list capped at ``max_total``.
+
+        The first non-empty summary text is preserved as the harvested
+        ``research`` text so the planner gets reasonable context even
+        when later follow-ups return only sources without prose.
+        """
+
+        if not query or not query.strip():
+            return "", []
+
+        target = max(0, int(target_min))
+        cap = max(target, int(max_total))
+        seen_urls: set[str] = set()
+        sources_out: list[dict[str, Any]] = []
+        summary_parts: list[str] = []
+
+        async def _take(q: str, k: int) -> None:
+            try:
+                summary, items = await self.search(q, max_results=k)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("search.harvest_failed", extra={"q": q, "err": str(exc)})
+                return
+            if isinstance(summary, str) and summary.strip():
+                summary_parts.append(summary.strip())
+            for s in items or []:
+                if not isinstance(s, dict):
+                    continue
+                url = str(s.get("url") or "").strip()
+                key = url or str(s)
+                if key in seen_urls:
+                    continue
+                seen_urls.add(key)
+                sources_out.append(s)
+                if len(sources_out) >= cap:
+                    return
+
+        # Primary query first (always).
+        await _take(query, max(target or 6, 6))
+
+        # Follow-ups only if we are still under the target. Three small,
+        # generic riders that don't depend on the topic kind.
+        if target and len(sources_out) < target:
+            riders = (
+                f"{query} 2024",
+                f"{query} overview",
+                f"{query} statistics",
+            )
+            for rider in riders:
+                if len(sources_out) >= target:
+                    break
+                await _take(rider, 5)
+
+        merged_summary = "\n\n".join(summary_parts[:2]).strip()
+        logger.info(
+            "search.harvest_done",
+            extra={
+                "target_min": target,
+                "found": len(sources_out),
+                "queries": 1 + (3 if target and len(sources_out) < target else 0),
+            },
+        )
+        return merged_summary, sources_out[:cap]
+
     # ── DuckDuckGo Instant Answer (no key) ───────────────────────────────
     async def _duckduckgo(
         self, query: str, max_results: int
@@ -213,134 +297,3 @@ class SearchService:
                 snip = s.get("snippet") or ""
                 lines.append(f"{i}. {t} — {snip}")
         return "\n".join(lines).strip()
-
-    # ── DEEP RESEARCH (multi-hop) ─────────────────────────────────────────
-    # Fixes the "Sri Lanka deck about Caltech students" hallucination class:
-    # we fetch the actual page text for the top results, extract concrete
-    # entities (dates, numbers, proper nouns), then run a second focused
-    # search using those entities. The combined corpus is what the LLM sees.
-    async def deep_search(
-        self,
-        query: str,
-        max_results: int = 6,
-        *,
-        fetch_pages: int = 3,
-        do_second_hop: bool = True,
-    ) -> tuple[str, list[dict[str, Any]]]:
-        """Multi-hop research. Always returns; never raises."""
-        first_summary, first_sources = await self.search(query, max_results=max_results)
-
-        # Fetch the top N pages and append extracted main text.
-        page_texts: list[str] = []
-        if fetch_pages > 0 and first_sources:
-            page_texts = await self._fetch_pages(
-                [s.get("url") for s in first_sources[:fetch_pages] if s.get("url")]
-            )
-
-        # Pull entities (4-digit years, $ amounts, percentages, capitalized
-        # multi-word phrases) from the fetched text.
-        entities = self._extract_entities(" \n".join(page_texts))
-
-        second_summary, second_sources = "", []
-        if do_second_hop and entities:
-            follow_q = f"{query} {' '.join(entities[:5])}"[:300]
-            try:
-                second_summary, second_sources = await self.search(
-                    follow_q, max_results=max(2, max_results // 2)
-                )
-            except Exception as exc:
-                logger.warning("search.deep_second_hop_failed", extra={"err": str(exc)})
-
-        # Build a single corpus the LLM can chew on.
-        parts: list[str] = []
-        if first_summary:
-            parts.append("== Primary search ==\n" + first_summary)
-        if page_texts:
-            parts.append("== Source excerpts ==")
-            for s, txt in zip(first_sources[:fetch_pages], page_texts):
-                if not txt:
-                    continue
-                parts.append(f"[{s.get('title','')}] {txt[:1500]}")
-        if entities:
-            parts.append("== Key entities extracted ==\n" + ", ".join(entities[:25]))
-        if second_summary:
-            parts.append("== Follow-up search ==\n" + second_summary)
-
-        all_sources = first_sources[:]
-        seen = {s.get("url") for s in all_sources}
-        for s in second_sources:
-            if s.get("url") and s["url"] not in seen:
-                all_sources.append(s)
-                seen.add(s["url"])
-
-        return ("\n\n".join(parts).strip(), all_sources)
-
-    async def _fetch_pages(self, urls: list[str]) -> list[str]:
-        """Fetch each URL and return cleaned main-text (best-effort, ~2KB each)."""
-        async def _one(u: str) -> str:
-            if not u:
-                return ""
-            try:
-                async with httpx.AsyncClient(
-                    timeout=12.0,
-                    follow_redirects=True,
-                    headers={"User-Agent": "NEXUS/1.0 research-bot"},
-                ) as client:
-                    r = await client.get(u)
-                if r.status_code != 200 or "text/html" not in r.headers.get(
-                    "content-type", ""
-                ):
-                    return ""
-                return self._extract_main_text(r.text)
-            except Exception as exc:
-                logger.debug("search.fetch_page_failed", extra={"url": u[:80], "err": str(exc)})
-                return ""
-
-        return await asyncio.gather(*(_one(u) for u in urls))
-
-    @staticmethod
-    def _extract_main_text(html: str) -> str:
-        """Strip scripts/styles/nav, return collapsed text body, capped at 2KB."""
-        try:
-            from bs4 import BeautifulSoup  # type: ignore
-        except Exception:
-            # Regex fallback if bs4 missing.
-            text = re.sub(r"<script[\s\S]*?</script>", " ", html, flags=re.I)
-            text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.I)
-            text = re.sub(r"<[^>]+>", " ", text)
-            return re.sub(r"\s+", " ", text).strip()[:2000]
-
-        soup = BeautifulSoup(html, "html.parser")
-        for tag in soup(["script", "style", "noscript", "nav", "footer", "header", "aside"]):
-            tag.decompose()
-        # Prefer <article> or <main> if present.
-        root = soup.find("article") or soup.find("main") or soup.body or soup
-        text = root.get_text(" ", strip=True) if root else ""
-        return re.sub(r"\s+", " ", text)[:2000]
-
-    @staticmethod
-    def _extract_entities(text: str) -> list[str]:
-        """Pull years, money, percents, and 2-3 word Capitalized phrases."""
-        if not text:
-            return []
-        out: list[str] = []
-        seen: set[str] = set()
-
-        def add(x: str) -> None:
-            x = x.strip()
-            if x and x.lower() not in seen and len(x) <= 60:
-                seen.add(x.lower())
-                out.append(x)
-
-        for m in re.findall(r"\b(1[5-9]\d{2}|20\d{2})\b", text):
-            add(m)
-        for m in re.findall(r"\$\s?\d[\d,\.]*\s?(?:million|billion|trillion|M|B|K)?", text):
-            add(m)
-        for m in re.findall(r"\b\d+(?:\.\d+)?\s?%", text):
-            add(m)
-        for m in re.findall(r"\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b", text):
-            if not re.match(r"^(The|This|That|These|Those|These|And|But|For|From|With)\b", m):
-                add(m)
-            if len(out) > 40:
-                break
-        return out

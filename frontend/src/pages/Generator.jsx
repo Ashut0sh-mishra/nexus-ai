@@ -1,30 +1,29 @@
 import { useEffect, useState } from "react";
 import { useParams, useLocation, Link } from "react-router-dom";
-import { Sparkles, User } from "lucide-react";
+import { Sparkles, User, Pencil, Play, X, RotateCw } from "lucide-react";
+import toast from "react-hot-toast";
 import { api } from "../utils/api.js";
 import { useTaskStream } from "../hooks/useGenerate.js";
+import { useJobLifecycle } from "../hooks/useJobLifecycle.js";
 import { normalizeSlides } from "../utils/slideParser.js";
 import ProgressStream from "../components/ProgressStream.jsx";
 import SlideCarousel from "../components/SlideCarousel.jsx";
 import ExportButtons from "../components/ExportButtons.jsx";
+import DeckQualityBadge from "../components/DeckQualityBadge.jsx";
+import SourceEvidencePanel from "../components/SourceEvidencePanel.jsx";
 
 export default function Generator() {
   const { taskId } = useParams();
   const location = useLocation();
   const initialTopic = location.state?.topic || "";
-  const initialTheme = location.state?.theme || "auto";
-  const { events, status, error, liveSlides, resolvedTheme, analysis } = useTaskStream(taskId);
+  const initialTheme = location.state?.theme || "light-pro";
+  const [restartKey, setRestartKey] = useState(0);
+  const { events, status, error, liveSlides } = useTaskStream(taskId, restartKey);
   const [slides, setSlides] = useState([]);
   const [theme, setTheme] = useState(initialTheme);
   const [topic, setTopic] = useState(initialTopic);
-
-  // If the backend resolved "auto" to a real theme, reflect it immediately.
-  useEffect(() => {
-    if (resolvedTheme && resolvedTheme !== theme) setTheme(resolvedTheme);
-  }, [resolvedTheme]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const wasAutoPicked =
-    initialTheme === "auto" && resolvedTheme && resolvedTheme === theme;
+  const [quality, setQuality] = useState(null);
+  const { cancel, retry, resume, inFlight, lastError } = useJobLifecycle(taskId);
 
   // While generation runs, show whatever slides have streamed in so far
   // (browser-use-style live preview). On `done`, the GET /slides/:id swap
@@ -34,6 +33,38 @@ export default function Generator() {
       ? slides
       : normalizeSlides((liveSlides || []).filter(Boolean));
   const isStreamingPreview = slides.length === 0 && visibleSlides.length > 0;
+  const isDone = status === "done";
+  // Phase 6Q lifecycle classification (mirrors services/lifecycle_service.py).
+  const isRunning = status === "pending" || status === "running";
+  const isCancelling = status === "cancelling";
+  const isCancelled = status === "cancelled";
+  const isFailed = status === "failed";
+  const canCancel = (isRunning || isCancelling) && inFlight !== "cancel";
+  const canRetryOrResume = (isFailed || isCancelled) && !inFlight;
+
+  const handleCancel = async () => {
+    const r = await cancel();
+    if (r) toast("Cancelling generation…", { icon: "⏹" });
+  };
+  const handleRetry = async () => {
+    const r = await retry();
+    if (r) {
+      setSlides([]);
+      setRestartKey((k) => k + 1);
+      toast.success("Retrying from scratch…");
+    }
+  };
+  const handleResume = async () => {
+    const r = await resume();
+    if (r) {
+      setSlides([]);
+      setRestartKey((k) => k + 1);
+      toast(
+        "Resuming… (no checkpoint persisted; runs from scratch)",
+        { icon: "↻" },
+      );
+    }
+  };
 
   useEffect(() => {
     if (status !== "done") return;
@@ -45,6 +76,7 @@ export default function Generator() {
         setSlides(normalizeSlides(res.data?.slides || []));
         if (res.data?.theme) setTheme(res.data.theme);
         if (!topic && res.data?.topic) setTopic(res.data.topic);
+        if (res.data?.deck_quality) setQuality(res.data.deck_quality);
       })
       .catch(() => {
         /* error surface handled by ProgressStream */
@@ -55,7 +87,7 @@ export default function Generator() {
   }, [status, taskId, topic]);
 
   return (
-    <div className="mx-auto max-w-6xl px-6 py-8">
+    <div className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-6xl flex-col px-6 py-8">
       {/* ChatGPT-style thread header */}
       <div className="mb-6 space-y-3">
         <div className="flex items-start gap-3">
@@ -80,9 +112,13 @@ export default function Generator() {
           <div className="flex-1 rounded-2xl rounded-tl-sm border border-nexus-border bg-nexus-surface px-4 py-3">
             <div className="text-[11px] uppercase tracking-widest text-nexus-dim">NEXUS</div>
             <p className="mt-1 text-sm text-nexus-muted">
-              {status === "done"
+              {isDone
                 ? `Done. Generated ${slides.length} slides in the \u201C${theme}\u201D theme.`
-                : status === "failed"
+                : isCancelling
+                ? "Stopping after the current step…"
+                : isCancelled
+                ? "Generation cancelled. You can retry or resume."
+                : isFailed
                 ? "Generation failed. See log below."
                 : "Researching, planning, writing, and assembling your deck…"}
             </p>
@@ -97,8 +133,89 @@ export default function Generator() {
         </Link>
       </div>
 
-      <div className="grid gap-8 lg:grid-cols-[360px,1fr]">
-        <ProgressStream events={events} status={status} error={error} analysis={analysis} />
+      {/* Phase 6Q: lifecycle action bar. Visible whenever the run is
+          not yet succeeded so the user can cancel a running job or
+          retry / resume a failed / cancelled one. Buttons are disabled
+          during in-flight requests to prevent double-submit. */}
+      {!isDone && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-nexus-border bg-nexus-surface/70 px-4 py-3">
+          <div className="text-xs text-nexus-muted">
+            {isRunning && "Generation in progress."}
+            {isCancelling && "Cancelling at the next safe checkpoint…"}
+            {isCancelled && "Cancelled."}
+            {isFailed && "Failed. You can retry or resume."}
+            {lastError && (
+              <span className="ml-2 text-red-400">({String(lastError)})</span>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={handleCancel}
+              disabled={!canCancel}
+              className="btn-ghost"
+              title="Stop generation at the next safe checkpoint"
+            >
+              <X className="h-4 w-4" />
+              {inFlight === "cancel" ? "Cancelling…" : "Cancel"}
+            </button>
+            <button
+              onClick={handleRetry}
+              disabled={!canRetryOrResume}
+              className="btn-ghost"
+              title="Retry the run from scratch"
+            >
+              <RotateCw className="h-4 w-4" />
+              {inFlight === "retry" ? "Retrying…" : "Retry"}
+            </button>
+            <button
+              onClick={handleResume}
+              disabled={!canRetryOrResume}
+              className="btn-ghost"
+              title="Resume (no persisted checkpoint; runs from scratch)"
+            >
+              <Play className="h-4 w-4" />
+              {inFlight === "resume" ? "Resuming…" : "Resume"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Phase 6M: prominent app-workspace action bar. Surfaces every
+          product action without forcing the user to scroll. Shown only
+          once status === "done" so we never advertise actions for a deck
+          that does not exist yet. */}
+      {isDone && (
+        <div className="mb-5 rounded-xl border border-nexus-border bg-nexus-surface/70 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <DeckQualityBadge quality={quality} />
+              <p className="text-xs text-nexus-muted">
+                {slides.length} slides · theme: {theme}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Link
+                to={`/deck/${taskId}`}
+                state={{ theme, topic }}
+                className="btn-primary"
+              >
+                <Pencil className="h-4 w-4" /> Open editor
+              </Link>
+              <Link
+                to={`/present/${taskId}`}
+                state={{ theme, topic }}
+                className="btn-ghost"
+              >
+                <Play className="h-4 w-4" /> Present
+              </Link>
+              <ExportButtons taskId={taskId} theme={theme} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="grid flex-1 gap-8 lg:grid-cols-[360px,1fr]">
+        <ProgressStream events={events} status={status} error={error} />
 
         <div className="space-y-4">
           {visibleSlides.length > 0 ? (
@@ -109,35 +226,8 @@ export default function Generator() {
                   Live preview · {visibleSlides.length} slide{visibleSlides.length === 1 ? "" : "s"} so far
                 </div>
               )}
-              <SlideCarousel slides={visibleSlides} initialTheme={theme} deckSeed={taskId} />
-              {status === "done" && (
-                <div className="flex items-center justify-between border-t border-nexus-border/60 pt-4">
-                  <p className="text-xs text-nexus-muted">
-                    {visibleSlides.length} slides · theme:{" "}
-                    <span className="text-nexus-text font-medium">{theme}</span>
-                    {wasAutoPicked && (
-                      <span className="ml-1 text-accent-purple">
-                        (NEXUS auto-picked)
-                      </span>
-                    )}
-                  </p>
-                  <div className="flex items-center gap-2">
-                    <Link
-                      to={`/present/${taskId}`}
-                      className="btn-ghost !py-1.5 !text-xs"
-                    >
-                      Present
-                    </Link>
-                    <Link
-                      to={`/editor/${taskId}`}
-                      className="btn-ghost !py-1.5 !text-xs"
-                    >
-                      Edit deck
-                    </Link>
-                    <ExportButtons taskId={taskId} theme={theme} />
-                  </div>
-                </div>
-              )}
+              <SlideCarousel slides={visibleSlides} initialTheme={theme} />
+              {isDone && <SourceEvidencePanel slides={slides} />}
             </>
           ) : (
             <div className="card flex aspect-video items-center justify-center text-nexus-muted">
