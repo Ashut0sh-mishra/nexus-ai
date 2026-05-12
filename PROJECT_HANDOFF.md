@@ -484,7 +484,11 @@ Highest-impact next tasks:
 9. Improve export parity between React renderer and backend PPTX/PDF renderer. (Phases 6AA + 6AC ship structural exporter degradation for the 4 new layouts; visual parity still unmeasured.)
 10. Add quotas/credit accounting around AI usage.
 11. ~~**(Phase 6X–6AE acceptance)** Commit unit tests for the in-flight phases and re-run the backend gate.~~ **Done.** Backend gate is now **521 passed / 2 skipped / 1 warning** (was 431/2/1 at Phase 6V; +90 new tests). Phases 6X / 6Y / 6AB / 6AA / 6AC / 6AD / 6AE are all promoted from Acceptance Pending to **Pass**. See the Phase 6X–6AE-Acceptance entry in `audits/AUDIT_CURRENT_STATE.md` for full details.
-12. **(Score-eligible) Live re-benchmark** after Phase 6X–6AE acceptance. Score is held at ~62/100 Partial until a logged `LIVE_EVAL_RESULTS/` JSON measures the impact of the new visible-cognition surface, 4 new layouts, intent metadata, and narrative beats.
+12. ~~**(Score-eligible) Live re-benchmark** after Phase 6X–6AE acceptance.~~ **Done (2026-05-11).** Full 11-prompt corpus re-run live against the current stack (items #3, #5, #6 in place). Results committed under `audits/LIVE_EVAL_RESULTS/*-2026-05-11.json`. Aggregate offline-measurable category scores vs. the 2026-05-09 baseline:
+    - `deck_correctness`: **7.64 → 9.45** (+1.81; 8/11 prompts now score 10/10)
+    - `evidence_accuracy`: **5.45 → 5.45** (flat — the offline rubric `_score_evidence_accuracy` in `backend/services/eval_service.py` only inspects `source_count` vs `min_sources_required` and cannot see the claim-level citations attached by item #5; a citation-aware rubric is the next score-eligible work)
+    - 11/11 prompts ran live (`ran_live: true`), slide-count window respected on 11/11, no pipeline failures on retry.
+    - Remaining structural gaps: `quote` layout still missing on `edu-001`, `evid-001`, `story-001`; `evid-001` still short on external sources (3 < 5).
 
 ## Reference Folder Findings
 

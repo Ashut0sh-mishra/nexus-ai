@@ -1,0 +1,49 @@
+{
+  "all_required_layouts_present": false,
+  "category_scores": {
+    "agent_autonomy": null,
+    "deck_correctness": 8,
+    "evidence_accuracy": 4,
+    "export_parity": null,
+    "security_production_readiness": null,
+    "stability_reliability": null,
+    "visual_quality": null
+  },
+  "chart_present": true,
+  "chart_required": true,
+  "chart_requirement_met": true,
+  "deck_quality_invalid_count": 0,
+  "deck_quality_ok": true,
+  "difficulty": "hard",
+  "external_source_expectation_met": false,
+  "fixture_label": null,
+  "generated_slide_count": 12,
+  "kind": "market_research",
+  "min_sources_required": 4,
+  "needs_external_sources": true,
+  "notes": [
+    "missing required layouts: ['stats']",
+    "source_count 3 < min_sources 4",
+    "visual_quality: unmeasured offline (requires screenshot diff)",
+    "export_parity: unmeasured per-prompt (covered by Phase 6C content tests)",
+    "agent_autonomy: unmeasured offline (requires runtime telemetry)",
+    "stability/security: measured at gate level, not per prompt"
+  ],
+  "prompt": "Produce a 12-slide market research report on the global vector database market 2024-2026.",
+  "prompt_id": "mkt-001",
+  "ran_live": true,
+  "required_layouts_missing": [
+    "stats"
+  ],
+  "required_layouts_present": [
+    "bullets",
+    "chart",
+    "closing",
+    "title",
+    "two-col"
+  ],
+  "schema_version": "1.0",
+  "slide_count_in_window": true,
+  "source_count": 3,
+  "timestamp_utc": "2026-05-11T11:15:52.818709+00:00"
+}

@@ -192,20 +192,145 @@ class NexusAgentLoop:
             await on_progress("Analyzing your topic...", 8.0, "analyze")
             await self._mark_running(task_id, "analyze", 8.0)
 
+            # Phase 6AM-Grounding: topic expansion.
+            # Short/vague prompts ("ai", "create ppt on ai") cause the
+            # search step to return disambiguation noise (Wikipedia
+            # stubs about unrelated subjects). We expand into 3-5
+            # specific queries BEFORE search so the harvester has real
+            # angles to ground on. The expander degrades to [topic]
+            # under env kill switch, LLM failure, or already-specific
+            # input \u2014 the pipeline keeps working unchanged in those
+            # cases. Tokens are charged to ``total_tokens`` so the
+            # frontend cost panel stays accurate.
+            search_queries: list[str] = [topic]
+            try:
+                from agent.topic_expander import expand_topic, canonicalize_topic
+
+                expanded, exp_tokens, exp_cost = await expand_topic(
+                    topic, ai_call=self._ai_call, max_queries=5
+                )
+                if expanded:
+                    search_queries = expanded
+                total_tokens += exp_tokens
+                total_cost += exp_cost
+                # Replace the topic the rest of the pipeline sees with
+                # the canonicalized form so meta-verbs ("create ppt on")
+                # don't leak into the planner / writer / image prompts.
+                canon = canonicalize_topic(topic)
+                if canon:
+                    topic = canon
+                if len(search_queries) > 1:
+                    await on_progress(
+                        f"Expanded to {len(search_queries)} search angles.",
+                        12.0,
+                        "analyze",
+                        event="design_decision",
+                        decision="topic_expanded",
+                        value={
+                            "queries": search_queries,
+                            "tokens": exp_tokens,
+                        },
+                    )
+            except Exception as exc:
+                logger.warning("loop.topic_expander_failed", extra={"err": str(exc)})
+
             # 2 — SEARCH
             research = ""
-            if search_web:
+            # Phase 6AN-JsonImport: when the task was created by the
+            # POST /api/import/json endpoint, the user-supplied data has
+            # already been written to the memory dir as
+            # ``seed_research.json`` (or ``seed_research.txt``). Use it
+            # as the research blob and skip the web-search step entirely
+            # \u2014 the generator should ground on the user's data, not
+            # Wikipedia. ``search_web`` is set to False on those tasks,
+            # so this branch is only reachable when there is in fact a
+            # seed file to read; the legacy path is untouched.
+            seed_research_text = ""
+            try:
+                from pathlib import Path as _Path
+                _seed_root = memory.root  # type: ignore[attr-defined]
+                _seed_json = _seed_root / "seed_research.json"
+                _seed_txt = _seed_root / "seed_research.txt"
+                if _seed_json.exists():
+                    import json as _json
+                    seed_research_text = _json.dumps(
+                        _json.loads(_seed_json.read_text(encoding="utf-8")),
+                        ensure_ascii=False, indent=2,
+                    )
+                elif _seed_txt.exists():
+                    seed_research_text = _seed_txt.read_text(encoding="utf-8")
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("loop.seed_research_read_failed", extra={"err": str(exc)})
+                seed_research_text = ""
+            if seed_research_text.strip():
+                research = seed_research_text[:20_000]
+                await on_progress(
+                    "Grounding on user-supplied data.",
+                    18.0,
+                    "search",
+                    event="design_decision",
+                    decision="seed_research",
+                    value={"chars": len(research)},
+                    rationale=(
+                        "Skipped web search; the deck is generated from the "
+                        "JSON payload provided with the import."
+                    ),
+                )
+            elif search_web:
                 await on_progress("Researching topic on the web...", 18.0, "search")
                 await self._mark_running(task_id, "search", 18.0)
                 try:
-                    # Phase 6U: when a min_sources target is set, harvest
-                    # across follow-up queries until we either hit the
-                    # target or honestly exhaust the providers. The
-                    # 6T benchmark showed that a single ``search()`` call
-                    # often returned 0–3 sources for prompts that needed
-                    # 4–5; ``harvest`` keeps trying instead of silently
-                    # giving up.
-                    if min_sources and hasattr(self.search, "harvest"):
+                    # Phase 6AM-Grounding: when expansion produced
+                    # multiple queries, run each through the search
+                    # backend in sequence and merge results. Dedupe by
+                    # URL. The harvest path's built-in riders still
+                    # apply for the FIRST query when min_sources is set.
+                    if len(search_queries) > 1:
+                        seen_urls: set[str] = set()
+                        merged_sources: list[dict[str, Any]] = []
+                        summary_parts: list[str] = []
+                        for qi, q in enumerate(search_queries):
+                            try:
+                                if (
+                                    qi == 0
+                                    and min_sources
+                                    and hasattr(self.search, "harvest")
+                                ):
+                                    sub_research, sub_sources = (
+                                        await self.search.harvest(
+                                            q,
+                                            target_min=min_sources,
+                                            max_total=8,
+                                        )
+                                    )
+                                else:
+                                    sub_research, sub_sources = (
+                                        await self.search.search(q, max_results=4)
+                                    )
+                            except Exception as exc:
+                                logger.warning(
+                                    "loop.search_query_failed",
+                                    extra={"q": q[:80], "err": str(exc)},
+                                )
+                                continue
+                            if isinstance(sub_research, str) and sub_research.strip():
+                                summary_parts.append(sub_research.strip())
+                            for s in sub_sources or []:
+                                if not isinstance(s, dict):
+                                    continue
+                                url = str(s.get("url") or "").strip()
+                                key = url or str(s)
+                                if key in seen_urls:
+                                    continue
+                                seen_urls.add(key)
+                                merged_sources.append(s)
+                                if len(merged_sources) >= 12:
+                                    break
+                            if len(merged_sources) >= 12:
+                                break
+                        research = "\n\n".join(summary_parts[:3]).strip()
+                        search_sources = merged_sources
+                    elif min_sources and hasattr(self.search, "harvest"):
                         research, search_sources = await self.search.harvest(
                             topic, target_min=min_sources, max_total=12
                         )
@@ -339,11 +464,86 @@ class NexusAgentLoop:
                 "strategy",
             )
 
+            # 2c — NARRATIVE SYNTHESIS (Phase 6AN-Story)
+            # Write the deck's prose-first ground truth before we plan
+            # slide titles. One LLM call produces a ~500-word editor's
+            # brief mapped to the strategy's story arc; both the planner
+            # and the writer then consume it so every slide condenses a
+            # paragraph of one coherent story instead of being invented
+            # in isolation. Degrades to None on kill switch or failure;
+            # the legacy outline-only path keeps working.
+            narrative = None
+            try:
+                from agent.narrative_synthesizer import synthesize_narrative
+                key_facts: list[str] = []
+                audience = ""
+                tone = ""
+                thesis_hint = ""
+                story_arc_list: list[str] = []
+                if strategy is not None:
+                    key_facts = list(getattr(strategy, "key_facts", []) or [])
+                    audience = getattr(strategy, "audience", "") or ""
+                    tone = getattr(strategy, "tone", "") or ""
+                    thesis_hint = getattr(strategy, "thesis", "") or ""
+                    story_arc_list = list(getattr(strategy, "story_arc", []) or [])
+                draft, n_tokens, n_cost = await synthesize_narrative(
+                    topic=topic,
+                    research=research,
+                    deck_type=_deck_type,
+                    audience=audience,
+                    tone=tone,
+                    thesis_hint=thesis_hint,
+                    story_arc=story_arc_list,
+                    key_facts=key_facts,
+                    slide_count=slide_count,
+                    ai_call=self._ai_call,
+                )
+                total_tokens += n_tokens
+                total_cost += n_cost
+                if not draft.is_empty:
+                    narrative = draft
+                    memory.write_artifact(
+                        "narrative.json",
+                        {
+                            "thesis": draft.thesis,
+                            "sections": [
+                                {"beat": s.beat, "heading": s.heading, "body": s.body}
+                                for s in draft.sections
+                            ],
+                        },
+                    )
+                    try:
+                        await on_progress(
+                            (draft.thesis or "Narrative drafted.")[:240],
+                            27.0,
+                            "strategy",
+                            event="design_decision",
+                            decision="narrative",
+                            value={
+                                "thesis": draft.thesis,
+                                "sections": [
+                                    {"beat": s.beat, "heading": s.heading}
+                                    for s in draft.sections
+                                ],
+                            },
+                            rationale=(
+                                "Story-first draft written before the slide "
+                                "skeleton. Each slide condenses one section."
+                            ),
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning(
+                            "loop.narrative_emit_failed", extra={"err": str(exc)}
+                        )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("loop.narrative_failed", extra={"err": str(exc)})
+                narrative = None
+
             # 3 — PLAN
             await on_progress("Planning slide structure...", 28.0, "plan")
             await self._mark_running(task_id, "plan", 28.0)
             outline, p_tokens, p_cost = await self.planner.plan(
-                topic, slide_count, research, strategy=strategy
+                topic, slide_count, research, strategy=strategy, narrative=narrative
             )
             total_tokens += p_tokens
             total_cost += p_cost
@@ -372,6 +572,7 @@ class NexusAgentLoop:
                     strategy=strategy,
                     deck_type=_deck_type,
                     mood=_mood,
+                    narrative=narrative,
                 )
                 total_tokens += g_tokens
                 total_cost += g_cost
@@ -448,8 +649,22 @@ class NexusAgentLoop:
             # canonical field shape, then re-attaches intent so the
             # rhythm event reflects the upgrades.
             try:
-                from agent.layout_recommender import recommend_layouts
+                from agent.layout_recommender import (
+                    recommend_layouts,
+                    enforce_hero,
+                    insert_section_dividers,
+                )
                 slides, _layout_upgrades = recommend_layouts(slides)
+                # Phase 6AI-B1 — guarantee at least one hero moment.
+                _slides_after_hero, _hero_upgrades = enforce_hero(slides)
+                if _hero_upgrades:
+                    slides = _slides_after_hero
+                    _layout_upgrades = list(_layout_upgrades) + list(_hero_upgrades)
+                # Phase 6AI-B6 — chapter break for long decks.
+                _slides_after_div, _div_upgrades = insert_section_dividers(slides)
+                if _div_upgrades:
+                    slides = _slides_after_div
+                    _layout_upgrades = list(_layout_upgrades) + list(_div_upgrades)
                 if _layout_upgrades:
                     slides = self._normalize_slides(slides, slide_count, topic)
                     try:
@@ -535,6 +750,118 @@ class NexusAgentLoop:
                 slides = repair_for_validator(slides)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("loop.deck_repair_failed", extra={"err": str(exc)})
+
+            # Phase 6AJ: deterministic editorial polish.
+            # Strengthens titles, drops hedging openers / generic phrases
+            # in bullets, and adds short narrative transitions where
+            # consecutive slides have an ``intent.narrative_role``.
+            # Pure / offline / additive — never raises, never removes
+            # numbers, years, or proper nouns. Runs after repair so the
+            # rewritten copy still satisfies the validator contract.
+            try:
+                from agent.editorial_pass import apply_editorial_pass
+                slides, editorial_summary = apply_editorial_pass(slides)
+                try:
+                    await on_progress(
+                        f"Edited {editorial_summary.get('headline_rewrites', 0)} titles, "
+                        f"{editorial_summary.get('bullet_rewrites', 0)} bullets; "
+                        f"added {editorial_summary.get('transitions_added', 0)} transitions.",
+                        96.5,
+                        "save",
+                        event="editorial_pass",
+                        editorial_summary=editorial_summary,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("loop.editorial_event_failed", extra={"err": str(exc)})
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("loop.editorial_pass_failed", extra={"err": str(exc)})
+
+            # Phase 6AL-Voice: deterministic editorial-voice pass.
+            # Rewrites category-label headlines ("Problem Statement",
+            # "Traction Metrics", "Investment Ask") into authored
+            # sentences derived from existing slide content, drops
+            # filler subtitles ("A Fundable Story", "Join Our Mission"),
+            # scrubs debug-grade transitions ("Setting the stage:",
+            # "What the data shows:"), and rewrites button-shaped
+            # closings into declarative titles. Pure / offline /
+            # deterministic / additive — no LLM, no network, never
+            # raises, exporter-safe. Kill-switch:
+            # NEXUS_DISABLE_VOICE_PASS=true.
+            try:
+                from agent.voice_pass import apply_voice_pass
+                slides, voice_summary = apply_voice_pass(slides)
+                if (
+                    voice_summary.get("headline_rewrites", 0)
+                    + voice_summary.get("subtitle_kills", 0)
+                    + voice_summary.get("transition_scrubs", 0)
+                    + voice_summary.get("closing_rewrites", 0)
+                    > 0
+                ):
+                    try:
+                        await on_progress(
+                            f"Voice pass: "
+                            f"{voice_summary.get('headline_rewrites', 0)} headline(s), "
+                            f"{voice_summary.get('subtitle_kills', 0)} filler subtitle(s), "
+                            f"{voice_summary.get('transition_scrubs', 0)} transition(s), "
+                            f"{voice_summary.get('closing_rewrites', 0)} closing(s) rewritten.",
+                            96.6,
+                            "save",
+                            event="design_decision",
+                            decision="voice_pass",
+                            value=voice_summary,
+                            rationale="Replaced category-label headlines and filler copy with authored deck voice.",
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning("loop.voice_event_failed", extra={"err": str(exc)})
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("loop.voice_pass_failed", extra={"err": str(exc)})
+
+            # Phase 6AK: mark cinematic hero moments. Writes is_hero=True
+            # on the first bigstat / section_divider / attributed quote
+            # so the renderer can promote them into full-bleed cinematic
+            # variants. Pure / offline / additive — renderer-only flag,
+            # ignored by exporters.
+            try:
+                from agent.cinematic_marker import mark_hero_moments
+                slides, hero_summary = mark_hero_moments(slides)
+                if hero_summary.get("total", 0) > 0:
+                    try:
+                        await on_progress(
+                            f"Marked {hero_summary.get('total', 0)} cinematic moment(s).",
+                            96.8,
+                            "save",
+                            event="design_decision",
+                            decision="cinematic_hero",
+                            value=hero_summary,
+                            rationale="Promoted hero slides for full-bleed cinematic rendering.",
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning("loop.cinematic_event_failed", extra={"err": str(exc)})
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("loop.cinematic_marker_failed", extra={"err": str(exc)})
+
+            # Phase 6AF: deterministic claim-level citation attach.
+            # Runs after repair so citations target the final, validator-
+            # accepted slides. Pure / offline / additive — never raises,
+            # never mutates ``sources``, and only writes ``slide["citations"]``.
+            try:
+                from agent.citation_attach import attach_citations_to_deck
+                slides, citation_summary = attach_citations_to_deck(slides)
+                try:
+                    await on_progress(
+                        f"Cited {citation_summary.get('supported', 0)}/"
+                        f"{citation_summary.get('total_claims', 0)} claims "
+                        f"across {citation_summary.get('slides_with_citations', 0)} slides.",
+                        97.0,
+                        "save",
+                        event="citation_checked",
+                        citation_summary=citation_summary,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("loop.citation_event_failed", extra={"err": str(exc)})
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("loop.citation_attach_failed", extra={"err": str(exc)})
+
             await self._save_deck(task_id, slides, theme, total_tokens, total_cost, model_used)
 
             await on_progress("Done! Your slides are ready.", 100.0, "done", status="done")
@@ -574,6 +901,7 @@ class NexusAgentLoop:
         strategy: Any | None = None,
         deck_type: str = "overview",
         mood: str = "neutral",
+        narrative: Any | None = None,
     ) -> tuple[list[dict[str, Any]], int, float]:
         await on_progress(f"Writing slides 1 of {slide_count}...", 35.0, "generate")
         outline_text = "\n".join(
@@ -581,7 +909,8 @@ class NexusAgentLoop:
             for i, p in enumerate(outline)
         )
         user_msg = slides_user_message(
-            topic, slide_count, research, outline_text, strategy=strategy
+            topic, slide_count, research, outline_text,
+            strategy=strategy, narrative=narrative,
         )
         text, tokens, cost = await self._ai_call(
             role="writer",
@@ -853,9 +1182,63 @@ class NexusAgentLoop:
         return out, total_tokens, total_cost
 
     # ── hero images ────────────────────────────────────────────────────────
-    # Layouts that benefit from a background visual. quote/stats are skipped
-    # because they're already centerpiece compositions and would clutter.
-    _IMAGE_LAYOUTS = {"title", "bullets", "two-col", "closing"}
+    # Phase 6AL-Visuals: image placement inversion.
+    # Image-bearing layouts now include the hero moments (quote, bigstat,
+    # section_divider). Stats / chart / table / comparison / timeline stay
+    # image-free because they're data-dense. The renderer is responsible
+    # for full-bleed vs right-panel composition; this method only attaches.
+    _IMAGE_LAYOUTS = {
+        "title", "bullets", "two-col", "closing",
+        "quote", "bigstat", "section_divider",
+    }
+
+    # Phase 6AL-Visuals: banned vocabulary that turns Pollinations into a
+    # stock-photo machine. We rewrite anything matching one of these words
+    # out of LLM-generated prompts before sending them downstream.
+    _IMAGE_BANNED_WORDS = (
+        "calming", "serene", "peaceful", "tranquil",
+        "growing", "vibrant", "modern", "professional", "corporate",
+        "beautiful", "stunning", "amazing", "perfect", "wonderful",
+        "abstract", "minimal", "minimalist", "clean", "simple",
+        "background", "wallpaper", "stock", "generic",
+        "businessman", "businesswoman", "team meeting", "handshake",
+        "lightbulb", "rocket", "graph going up", "thumbs up",
+    )
+
+    # Phase 6AL-Visuals: deterministic cinematic suffix appended to every
+    # image prompt. Forces editorial / documentary photography feel and
+    # blocks Pollinations' default "AI slop" aesthetic. Kept additive so
+    # weak LLM output still produces atmospheric imagery.
+    _IMAGE_CINEMATIC_SUFFIX = (
+        "shot on 35mm film, shallow depth of field, golden hour lighting, "
+        "editorial photography, atmospheric, cinematic composition, "
+        "muted color grading, no text, no logos, no watermarks"
+    )
+
+    @classmethod
+    def _scrub_image_prompt(cls, raw: str) -> str:
+        """Strip banned vocabulary; collapse whitespace. Never returns empty."""
+        cleaned = (raw or "").strip()
+        if not cleaned:
+            return ""
+        lowered = cleaned.lower()
+        for word in cls._IMAGE_BANNED_WORDS:
+            if word in lowered:
+                # Word-boundary replacement so "abstract" doesn't nuke
+                # "extraction"; case-insensitive.
+                cleaned = re.sub(
+                    rf"\b{re.escape(word)}\b", "", cleaned, flags=re.IGNORECASE
+                )
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.;:-")
+        return cleaned
+
+    @classmethod
+    def _direct_image_prompt(cls, subject: str) -> str:
+        """Compose subject + cinematic suffix into the final Pollinations brief."""
+        subj = cls._scrub_image_prompt(subject)
+        if not subj:
+            subj = "documentary scene"
+        return f"{subj}, {cls._IMAGE_CINEMATIC_SUFFIX}"
 
     async def _add_hero_images(
         self,
@@ -874,7 +1257,11 @@ class NexusAgentLoop:
 
         await on_progress("Generating slide imagery...", 94.0, "images")
 
-        # ONE LLM call to generate concise visual prompts for every target slide.
+        # ONE LLM call to generate cinematic visual subjects for every
+        # target slide. The model is asked for SUBJECT + LIGHTING + LENS
+        # + MOOD — never style adjectives. We append the editorial suffix
+        # deterministically so the final prompt is always cinematic even
+        # if the LLM output is weak.
         prompts: list[str] = []
         tokens = 0
         cost = 0.0
@@ -885,19 +1272,30 @@ class NexusAgentLoop:
             )
             user = (
                 f"Topic: {topic}\n\n"
-                f"Slides needing a hero image:\n{indexed}\n\n"
-                f"For EACH slide above, write a single concise visual prompt (max 18 words) "
-                f"that an image model can render as a clean, editorial, non-text background. "
-                f"Avoid: text, logos, watermarks, faces of real people. "
-                f"Prefer: abstract gradients, photographic scenes, minimal compositions.\n"
+                f"Slides needing a cinematic image:\n{indexed}\n\n"
+                f"You are an art director briefing a documentary photographer.\n"
+                f"For EACH slide, write ONE concrete visual brief (max 22 words) "
+                f"specifying a SUBJECT, a LIGHTING condition, and a CAMERA framing.\n\n"
+                f"Examples of GOOD briefs:\n"
+                f"- 'rain-slicked harbor at dawn, fishermen pulling nets, long lens, side light'\n"
+                f"- 'half-empty warehouse with single forklift, fluorescent overhead, wide angle, deep shadow'\n"
+                f"- 'analyst's desk at night, blue monitor glow on face, 50mm portrait, shallow focus'\n\n"
+                f"DO NOT use words like: calming, serene, vibrant, modern, professional, "
+                f"abstract, beautiful, stunning, background. No stock-photo cliches "
+                f"(handshakes, lightbulbs, arrows pointing up, team meetings).\n"
+                f"DO use specific subjects, real places, named lighting, real lens choices.\n\n"
                 f"Return ONLY a JSON array of strings in slide order. No prose."
             )
             text, tokens, cost = await self._ai_call(
                 role="vision",
-                system="You write concise visual prompts for an image model. Return only a JSON array of strings.",
+                system=(
+                    "You are an art director writing cinematic image briefs. "
+                    "You return only a JSON array of strings, each describing "
+                    "a concrete subject, lighting, and lens."
+                ),
                 user=user,
-                max_tokens=600,
-                temperature=0.4,
+                max_tokens=700,
+                temperature=0.5,
             )
             cleaned = self._strip_fences(text)
             match = re.search(r"\[[\s\S]*\]", cleaned)
@@ -910,16 +1308,19 @@ class NexusAgentLoop:
             logger.warning("images.prompt_gen_failed", extra={"err": str(exc)})
             prompts = []
 
-        # Fallback: if the LLM failed, build prompts from slide titles.
+        # Fallback: if the LLM failed or under-delivered, synthesize a
+        # subject from the slide title. The cinematic suffix is appended
+        # by _direct_image_prompt regardless of source.
         if len(prompts) < len(target_indices):
-            for i in target_indices[len(prompts) :]:
+            for i in target_indices[len(prompts):]:
                 t = slides[i].get("title") or topic
-                prompts.append(f"editorial abstract visual for: {t}, soft gradient, no text")
+                prompts.append(f"documentary scene illustrating {t}, low key lighting, 35mm")
 
         for slot, idx in enumerate(target_indices):
-            prompt = prompts[slot] if slot < len(prompts) else f"abstract {topic}"
-            slides[idx]["image_url"] = pollinations_url(prompt, seed=idx + 1)
-            slides[idx]["image_prompt"] = prompt
+            raw = prompts[slot] if slot < len(prompts) else topic
+            final_prompt = self._direct_image_prompt(raw)
+            slides[idx]["image_url"] = pollinations_url(final_prompt, seed=idx + 1)
+            slides[idx]["image_prompt"] = final_prompt
 
         logger.info(
             "images.attached", extra={"count": len(target_indices), "total": len(slides)}

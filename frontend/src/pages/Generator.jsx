@@ -11,6 +11,8 @@ import SlideCarousel from "../components/SlideCarousel.jsx";
 import ExportButtons from "../components/ExportButtons.jsx";
 import DeckQualityBadge from "../components/DeckQualityBadge.jsx";
 import SourceEvidencePanel from "../components/SourceEvidencePanel.jsx";
+import StorylineRibbon from "../components/StorylineRibbon.jsx";
+import AgentRunTimeline from "../components/AgentRunTimeline.jsx";
 
 export default function Generator() {
   const { taskId } = useParams();
@@ -215,7 +217,10 @@ export default function Generator() {
       )}
 
       <div className="grid flex-1 gap-8 lg:grid-cols-[360px,1fr]">
-        <ProgressStream events={events} status={status} error={error} />
+        <div className="space-y-3">
+          <ProgressStream events={events} status={status} error={error} />
+          <AgentRunTimeline taskId={taskId} taskStatus={status} />
+        </div>
 
         <div className="space-y-4">
           {visibleSlides.length > 0 ? (
@@ -226,7 +231,12 @@ export default function Generator() {
                   Live preview · {visibleSlides.length} slide{visibleSlides.length === 1 ? "" : "s"} so far
                 </div>
               )}
-              <SlideCarousel slides={visibleSlides} initialTheme={theme} />
+              <SlideCarousel
+                slides={visibleSlides}
+                initialTheme={theme}
+                onThemeChange={setTheme}
+              />
+              {isDone && <StorylineRibbon slides={visibleSlides} />}
               {isDone && <SourceEvidencePanel slides={slides} />}
             </>
           ) : (

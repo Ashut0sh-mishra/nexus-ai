@@ -367,7 +367,234 @@ _UPGRADERS = (
     _try_section_divider_upgrade,
     _try_timeline_upgrade,
     _try_comparison_upgrade,
+    None,  # placeholder; assigned below after _try_quote_upgrade is defined
 )
+
+
+# ── Phase 6AI-B7 — Quote enforcement ──────────────────────────────────────
+
+# A bullet that looks like a quote: starts and ends with a quotation mark
+# OR contains an em-dash attribution after a long string. We require the
+# quoted body to be at least 8 words so we don't promote one-liners.
+_QUOTE_DELIMS = ("\u201c", "\u201d", "\u2018", "\u2019", "\"", "'")
+_ATTRIBUTION_RE = re.compile(r"\s+[—–-]\s+([A-Z][A-Za-z .'’\-]{2,80})\s*$")
+
+
+def _looks_like_quote(text: str) -> tuple[str, str] | None:
+    """Return (quote_text, attribution) when the bullet reads like a quote."""
+    if not isinstance(text, str):
+        return None
+    raw = text.strip()
+    if not raw:
+        return None
+    attribution = ""
+    quote_body = raw
+    m = _ATTRIBUTION_RE.search(raw)
+    if m:
+        attribution = m.group(1).strip()
+        quote_body = raw[: m.start()].strip()
+    starts_quoted = quote_body[:1] in _QUOTE_DELIMS
+    ends_quoted = quote_body[-1:] in _QUOTE_DELIMS
+    if starts_quoted and ends_quoted:
+        # strip outer quotes
+        quote_body = quote_body[1:-1].strip()
+    elif not (starts_quoted or attribution):
+        return None
+    word_count = len(re.findall(r"\w+", quote_body))
+    if word_count < 8:
+        return None
+    return quote_body, attribution
+
+
+def _try_quote_upgrade(slide: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    """Promote a bullets slide whose first long bullet reads like a quote.
+
+    Conservative: only fires when bullets has exactly one entry that
+    looks like a quote, OR when the longest bullet is unambiguously a
+    quoted snippet ≥8 words. Never drops other substantive bullets —
+    if there are 2+ non-quote bullets, the upgrade is refused.
+    """
+    if slide.get("layout") != "bullets":
+        return None
+    bullets = slide.get("bullets") or []
+    if not isinstance(bullets, list) or not bullets:
+        return None
+    candidate: tuple[str, str] | None = None
+    other_substantive = 0
+    for b in bullets:
+        parsed = _looks_like_quote(b)
+        if parsed is not None and candidate is None:
+            candidate = parsed
+        elif isinstance(b, str) and b.strip() and len(b.strip()) > 12:
+            other_substantive += 1
+    if candidate is None or other_substantive >= 2:
+        return None
+    quote_body, attribution = candidate
+    word_count = len(re.findall(r"\w+", quote_body))
+    upgraded = {
+        **{k: v for k, v in slide.items() if k != "bullets"},
+        "layout": "quote",
+        "quote": quote_body,
+        "attribution": attribution,
+    }
+    reason = (
+        f"Detected a {word_count}-word quoted statement"
+        + (f" attributed to {attribution}" if attribution else "")
+        + " — quote layout carries the voice."
+    )
+    return upgraded, reason
+
+
+# Patch the placeholder in _UPGRADERS so the registration order is
+# stable and other upgraders run first (quote is the most aggressive
+# rewrite — it discards bullet structure).
+_UPGRADERS = tuple(u for u in _UPGRADERS if u is not None) + (_try_quote_upgrade,)
+
+
+# ── Phase 6AI-B1 — Hero-slide enforcement ─────────────────────────────────
+
+
+def enforce_hero(
+    slides: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Ensure the deck has at least one hero ``bigstat`` slide.
+
+    Runs *after* ``recommend_layouts``. If the deck already contains a
+    ``bigstat`` slide anywhere, this is a no-op. Otherwise the function
+    looks for the best candidate to promote — preferring a ``stats``
+    slide in the first half of the deck, falling back to any later
+    ``stats`` slide. The promotion uses ``stats[0]`` as the hero
+    metric. Never touches the first slide (always ``title``) or the
+    last slide (always ``closing``).
+
+    Returns ``(slides, upgrades)`` where ``upgrades`` is at most one
+    record (or empty when no candidate exists). Each upgrade record
+    matches the ``recommend_layouts`` shape so the loop can emit the
+    same ``design_decision`` event for it.
+    """
+    if not isinstance(slides, list) or len(slides) < 3:
+        return (slides if isinstance(slides, list) else [], [])
+
+    # Already have a hero?
+    for s in slides:
+        if isinstance(s, dict) and s.get("layout") == "bigstat":
+            return slides, []
+
+    last = len(slides) - 1
+    midpoint = max(1, len(slides) // 2)
+
+    def _candidate_score(idx: int, slide: dict[str, Any]) -> int | None:
+        if idx == 0 or idx == last:
+            return None
+        if slide.get("layout") != "stats":
+            return None
+        stats = slide.get("stats")
+        if not isinstance(stats, list) or not stats:
+            return None
+        first = stats[0] if isinstance(stats[0], dict) else None
+        if not first:
+            return None
+        value = str(first.get("value") or "").strip()
+        if not value:
+            return None
+        # Earlier slides score higher (lower idx). Slides in the first
+        # half score better than later. A slight bonus for a parsable
+        # number.
+        score = 100 - idx * 5
+        if idx <= midpoint:
+            score += 20
+        if _parse_number(value) is not None:
+            score += 5
+        return score
+
+    best_idx: int | None = None
+    best_score = -1
+    for i, s in enumerate(slides):
+        if not isinstance(s, dict):
+            continue
+        score = _candidate_score(i, s)
+        if score is not None and score > best_score:
+            best_idx = i
+            best_score = score
+
+    if best_idx is None:
+        return slides, []
+
+    target = slides[best_idx]
+    stats = target.get("stats") or []
+    first = stats[0] if (stats and isinstance(stats[0], dict)) else {}
+    value = str(first.get("value") or "").strip()
+    label = str(first.get("label") or "").strip()
+    promoted = {
+        **{k: v for k, v in target.items() if k != "stats"},
+        "layout": "bigstat",
+        "value": value,
+        "label": label,
+        "subtitle": str(target.get("subtitle") or "").strip(),
+    }
+    out = list(slides)
+    out[best_idx] = promoted
+    upgrades = [
+        {
+            "slide_index": best_idx + 1,
+            "from": "stats",
+            "to": "bigstat",
+            "reason": (
+                "Hero enforcement — deck lacked a single dominant moment; "
+                f"promoted slide {best_idx + 1}'s headline metric '{value}' "
+                "to a full-bleed hero."
+            ),
+        }
+    ]
+    return out, upgrades
+
+
+# ── Phase 6AI-B6 — Section divider auto-insertion ─────────────────────────
+
+
+def insert_section_dividers(
+    slides: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Insert a single ``section_divider`` near the deck midpoint.
+
+    Only fires when:
+    * The deck has at least 7 slides.
+    * No ``section_divider`` is already present.
+    * A reasonable insertion point (between two non-pinned slides) exists.
+
+    The inserted divider's ``title`` mirrors the title of the slide that
+    follows it (so the divider reads as a chapter header). Pure-Python,
+    deterministic, additive.
+    """
+    if not isinstance(slides, list) or len(slides) < 7:
+        return (slides if isinstance(slides, list) else [], [])
+    for s in slides:
+        if isinstance(s, dict) and s.get("layout") == "section_divider":
+            return slides, []
+    last = len(slides) - 1
+    insert_at = max(2, min(last - 1, len(slides) // 2))
+    next_slide = slides[insert_at] if isinstance(slides[insert_at], dict) else {}
+    follow_title = str(next_slide.get("title") or "").strip() or "Next"
+    divider = {
+        "id": f"divider-{insert_at}",
+        "layout": "section_divider",
+        "eyebrow": "Section",
+        "title": follow_title,
+        "subtitle": "",
+    }
+    out = list(slides[:insert_at]) + [divider] + list(slides[insert_at:])
+    upgrades = [
+        {
+            "slide_index": insert_at + 1,
+            "from": None,
+            "to": "section_divider",
+            "reason": (
+                f"Long deck ({len(slides)} slides) had no chapter break — "
+                f"inserted a typography pause before '{follow_title}'."
+            ),
+        }
+    ]
+    return out, upgrades
 
 
 # ── Public API ─────────────────────────────────────────────────────────────
@@ -429,4 +656,4 @@ def recommend_layouts(
     return out, upgrades
 
 
-__all__ = ["recommend_layouts"]
+__all__ = ["recommend_layouts", "enforce_hero", "insert_section_dividers"]

@@ -26,6 +26,18 @@ export const LAYOUT_ALIASES = Object.freeze({
 
 export const FALLBACK_LAYOUT = registry.fallback || "bullets";
 
+// Per-layout schema hints used by UnsupportedLayoutSlide's "Expected schema"
+// card. Sourced from the registry JSON's per-layout description. The lookup
+// is by canonical name and is intentionally permissive — callers must
+// tolerate `undefined` for layouts that don't have a description.
+export const LAYOUT_SCHEMAS = Object.freeze(
+  Object.fromEntries(
+    layoutEntries
+      .filter((entry) => entry && entry.description)
+      .map((entry) => [entry.name, [entry.description]]),
+  ),
+);
+
 const CANONICAL_SET = new Set(CANONICAL_LAYOUTS);
 
 /**

@@ -36,6 +36,7 @@ class Planner:
         research: str,
         *,
         strategy: Any | None = None,
+        narrative: Any | None = None,
     ) -> tuple[list[dict[str, Any]], int, float]:
         """Return (outline, tokens_used, cost_usd).
 
@@ -44,9 +45,16 @@ class Planner:
         rendered into the user prompt so the LLM knows the deck's
         intended type, story arc, audience, and layout recipe. Older
         callers that do not pass ``strategy`` continue to work unchanged.
+
+        ``narrative`` is an optional
+        :class:`agent.narrative_synthesizer.NarrativeDraft` (Phase 6AN).
+        When present the planner is told to align each slide with one
+        section of the prose draft, in order, instead of inventing the
+        skeleton from outline intents alone.
         """
         user_msg = planner_user_message(
-            topic, slide_count, research or "", strategy=strategy
+            topic, slide_count, research or "",
+            strategy=strategy, narrative=narrative,
         )
         try:
             # Phase 6W: prefer role-routed model (planner). Fall back to the

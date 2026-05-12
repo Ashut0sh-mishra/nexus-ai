@@ -12,23 +12,54 @@ export default function ExportButtons({ taskId, theme }) {
 
   const handle = async (kind) => {
     setBusy(kind);
+    // Phase 6AL-Export: surface a soft warning if the export takes longer
+    // than 4s so the user knows the spinner is real progress, not a hang.
+    // First-time PPTX exports fetch 4-6 Pollinations images in parallel
+    // and can legitimately take 10-20s.
+    let slowToastId = null;
+    if (kind === "pptx" || kind === "pdf") {
+      slowToastId = setTimeout(() => {
+        slowToastId = toast.loading(
+          kind === "pptx"
+            ? "Assembling slides and images…"
+            : "Rendering PDF…",
+          { id: `export-slow-${kind}` }
+        );
+      }, 4000);
+    }
+    const triggerDownload = (url, filename) => {
+      // Use a hidden anchor so the browser treats this as a real
+      // download instead of a navigation, avoiding the "new tab that
+      // immediately closes" flash some browsers show for window.open.
+      const a = document.createElement("a");
+      a.href = url;
+      a.rel = "noopener";
+      a.target = "_blank";
+      if (filename) a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    };
     try {
       if (kind === "pptx") {
         const { download_url } = await exportPptx(taskId, theme);
-        window.open(download_url, "_blank", "noopener");
-        toast.success("PPTX ready.");
+        triggerDownload(download_url, `${taskId}.pptx`);
+        toast.success("PPTX ready.", { id: `export-slow-${kind}` });
       } else if (kind === "pdf") {
         const { download_url } = await exportPdf(taskId, theme);
-        window.open(download_url, "_blank", "noopener");
-        toast.success("PDF ready.");
+        triggerDownload(download_url, `${taskId}.pdf`);
+        toast.success("PDF ready.", { id: `export-slow-${kind}` });
       } else if (kind === "share") {
         const { share_url } = await createShare(taskId);
         setShareUrl(share_url);
         setShareOpen(true);
       }
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Export failed.");
+      toast.error(err?.response?.data?.detail || "Export failed.", {
+        id: `export-slow-${kind}`,
+      });
     } finally {
+      if (typeof slowToastId === "number") clearTimeout(slowToastId);
       setBusy(null);
     }
   };

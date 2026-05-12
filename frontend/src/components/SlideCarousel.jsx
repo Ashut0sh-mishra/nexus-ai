@@ -4,9 +4,26 @@ import SlideRenderer from "./SlideRenderer.jsx";
 
 const THEMES = ["light-pro", "Editorial", "Pixel", "Vellum", "Dossier"];
 
-export default function SlideCarousel({ slides = [], initialTheme = "light-pro" }) {
+export default function SlideCarousel({
+  slides = [],
+  initialTheme = "light-pro",
+  onThemeChange,
+}) {
   const [idx, setIdx] = useState(0);
   const [theme, setTheme] = useState(initialTheme);
+
+  // Keep local theme in sync if the parent updates initialTheme (e.g.
+  // after the server returns the persisted theme on task complete).
+  useEffect(() => {
+    setTheme(initialTheme);
+  }, [initialTheme]);
+
+  // Lift theme changes so callers (Generator, etc.) can pass the
+  // user-selected theme to the export endpoint instead of the initial one.
+  const handleThemePick = (t) => {
+    setTheme(t);
+    if (typeof onThemeChange === "function") onThemeChange(t);
+  };
 
   useEffect(() => {
     const onKey = (e) => {
@@ -43,7 +60,7 @@ export default function SlideCarousel({ slides = [], initialTheme = "light-pro" 
           {THEMES.map((t) => (
             <button
               key={t}
-              onClick={() => setTheme(t)}
+              onClick={() => handleThemePick(t)}
               className={`rounded-md px-2 py-1 text-xs transition ${
                 theme === t
                   ? "bg-nexus-card text-nexus-text border border-nexus-borderHi"

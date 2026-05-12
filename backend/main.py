@@ -18,8 +18,10 @@ from api.routes import (
     auth,
     export,
     generate,
+    import_json,
     import_pptx,
     lifecycle,
+    runs,
     share,
     slides,
     status,
@@ -85,11 +87,13 @@ app.include_router(status.router, prefix="/api", tags=["status"])
 app.include_router(lifecycle.router, prefix="/api", tags=["lifecycle"])
 app.include_router(slides.router, prefix="/api", tags=["slides"])
 app.include_router(import_pptx.router, prefix="/api", tags=["import"])
+app.include_router(import_json.router, prefix="/api", tags=["import"])
 app.include_router(themes.router, prefix="/api", tags=["themes"])
 app.include_router(export.router, prefix="/api", tags=["export"])
 app.include_router(share.router, prefix="/api", tags=["share"])
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(agent.router, prefix="/api", tags=["agent"])
+app.include_router(runs.router, prefix="/api", tags=["runs"])
 
 
 @app.get("/", include_in_schema=False)

@@ -93,6 +93,21 @@ function sampleSlide(layout) {
       return { ...base, columns: SAMPLE_COLUMNS };
     case "section":
       return { ...base, eyebrow: "Part 02", subtitle: "A divider slide between major sections." };
+    case "section_divider":
+      return {
+        ...base,
+        eyebrow: "Part 02",
+        title: "Where the strategy turns",
+        subtitle: "A typography pause between major sections of the deck.",
+      };
+    case "bigstat":
+      return {
+        ...base,
+        title: "Activation",
+        value: "62%",
+        label: "Week-1 activation",
+        subtitle: "Up from 41% before the onboarding redesign.",
+      };
     case "image-focus":
       return { ...base, image_url: "https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=1200" };
     default:

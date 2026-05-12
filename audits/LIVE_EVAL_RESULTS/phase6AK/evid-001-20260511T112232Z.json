@@ -1,0 +1,48 @@
+{
+  "all_required_layouts_present": false,
+  "category_scores": {
+    "agent_autonomy": null,
+    "deck_correctness": 8,
+    "evidence_accuracy": 4,
+    "export_parity": null,
+    "security_production_readiness": null,
+    "stability_reliability": null,
+    "visual_quality": null
+  },
+  "chart_present": true,
+  "chart_required": false,
+  "chart_requirement_met": true,
+  "deck_quality_invalid_count": 0,
+  "deck_quality_ok": true,
+  "difficulty": "hard",
+  "external_source_expectation_met": false,
+  "fixture_label": null,
+  "generated_slide_count": 10,
+  "kind": "evidence_heavy",
+  "min_sources_required": 5,
+  "needs_external_sources": true,
+  "notes": [
+    "missing required layouts: ['quote']",
+    "source_count 3 < min_sources 5",
+    "visual_quality: unmeasured offline (requires screenshot diff)",
+    "export_parity: unmeasured per-prompt (covered by Phase 6C content tests)",
+    "agent_autonomy: unmeasured offline (requires runtime telemetry)",
+    "stability/security: measured at gate level, not per prompt"
+  ],
+  "prompt": "Build a 10-slide policy briefing on EU AI Act compliance obligations for foundation-model providers.",
+  "prompt_id": "evid-001",
+  "ran_live": true,
+  "required_layouts_missing": [
+    "quote"
+  ],
+  "required_layouts_present": [
+    "bullets",
+    "closing",
+    "title",
+    "two-col"
+  ],
+  "schema_version": "1.0",
+  "slide_count_in_window": true,
+  "source_count": 3,
+  "timestamp_utc": "2026-05-11T11:22:32.604507+00:00"
+}

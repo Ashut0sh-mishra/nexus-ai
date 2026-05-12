@@ -30,6 +30,9 @@ import ExportButtons from "../components/ExportButtons.jsx";
 import DeckQualityBadge from "../components/DeckQualityBadge.jsx";
 import SourceEvidencePanel from "../components/SourceEvidencePanel.jsx";
 import CitationsPanel from "../components/CitationsPanel.jsx";
+import StorylineRibbon from "../components/StorylineRibbon.jsx";
+import LayoutRationaleChip from "../components/LayoutRationaleChip.jsx";
+import SlideReasoningDrawer from "../components/SlideReasoningDrawer.jsx";
 
 const THEMES = ["light-pro", "Editorial", "Pixel", "Vellum", "Dossier"];
 
@@ -408,9 +411,12 @@ export default function DeckWorkspace() {
         {/* Live preview */}
         <section className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="font-mono text-xs text-nexus-dim">
-              {String(safeIdx + 1).padStart(2, "0")} /{" "}
-              {String(total).padStart(2, "0")}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="font-mono text-xs text-nexus-dim">
+                {String(safeIdx + 1).padStart(2, "0")} /{" "}
+                {String(total).padStart(2, "0")}
+              </div>
+              <LayoutRationaleChip slide={active} />
             </div>
             <div className="flex items-center gap-1.5">
               {THEMES.map((t) => (
@@ -429,6 +435,7 @@ export default function DeckWorkspace() {
             </div>
           </div>
           <SlideRenderer slide={active} theme={theme} />
+          <SlideReasoningDrawer slide={active} slideIndex={safeIdx} />
         </section>
 
         {/* Editor pane */}
@@ -458,6 +465,7 @@ export default function DeckWorkspace() {
       </div>
 
       <div className="mt-6 space-y-3">
+        <StorylineRibbon slides={slides} currentIndex={safeIdx} />
         <CitationsPanel taskId={taskId} />
         <SourceEvidencePanel slides={slides} />
       </div>

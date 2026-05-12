@@ -1,4 +1,4 @@
-"""Phase 6I — Tests for runtime-driven /api/generate behind feature flag.
+"""Phase 6I / 6AG — Tests for runtime-driven /api/generate behind feature flag.
 
 Goal of this suite:
 
@@ -6,10 +6,13 @@ Goal of this suite:
    behavior is unchanged: 202 + ``{task_id, status}``, no AgentRun rows
    are written, no agent_run_id in the response payload.
 2. With ``NEXUS_RUNTIME_DRIVES_GENERATE=True``, the route additionally
-   creates exactly one AgentRun (linked via ``task_id``) and writes a
-   single ``thought`` AgentStep, the run is marked ``done``, and the
-   response payload still satisfies the existing live-eval adapter
-   contract (``task_id`` present, JSON parseable).
+   **opens** an AgentRun (linked via ``task_id``, status ``running``,
+   meta.mode=``pipeline_trail``) and writes a single ``thought`` step
+   describing the Celery dispatch. The worker is responsible for
+   appending pipeline-phase steps and finalising the run; from the
+   API's perspective the run is left open. The response payload still
+   satisfies the existing live-eval adapter contract (``task_id``
+   present, JSON parseable).
 3. With the flag on but step persistence failing, the API still returns
    202 with the task_id, the AgentRun row exists, and its status is
    ``failed`` — the failure is recorded, not raised.
@@ -147,10 +150,14 @@ def test_generate_flag_on_persists_run_and_step(monkeypatch):
                 run = runs[0]
                 assert run.id == body["agent_run_id"]
                 assert run.task_id == body["task_id"]
-                assert run.status == "done"
+                # Phase 6AG: the route opens the run and leaves it for the
+                # worker to finalise. The route never marks it ``done``.
+                assert run.status == "running"
                 assert run.goal.startswith("Investor pitch")
-                assert (run.meta or {}).get("phase") == "6I"
-                assert (run.meta or {}).get("dispatch_only") is True
+                assert (run.meta or {}).get("phase") == "6AG"
+                assert (run.meta or {}).get("mode") == "pipeline_trail"
+                # The legacy ``dispatch_only`` flag must no longer be set.
+                assert "dispatch_only" not in (run.meta or {})
 
                 steps = (
                     await s.execute(
@@ -159,6 +166,7 @@ def test_generate_flag_on_persists_run_and_step(monkeypatch):
                 ).scalars().all()
                 assert len(steps) == 1
                 assert steps[0].kind == "thought"
+                assert steps[0].action == "dispatch_celery"
                 assert steps[0].status == "ok"
                 assert (steps[0].input_json or {}).get("dispatch") == "celery"
         finally:

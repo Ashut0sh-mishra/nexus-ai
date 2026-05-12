@@ -1,0 +1,48 @@
+{
+  "all_required_layouts_present": false,
+  "category_scores": {
+    "agent_autonomy": null,
+    "deck_correctness": 8,
+    "evidence_accuracy": 2,
+    "export_parity": null,
+    "security_production_readiness": null,
+    "stability_reliability": null,
+    "visual_quality": null
+  },
+  "chart_present": true,
+  "chart_required": false,
+  "chart_requirement_met": true,
+  "deck_quality_invalid_count": 0,
+  "deck_quality_ok": true,
+  "difficulty": "easy",
+  "external_source_expectation_met": false,
+  "fixture_label": null,
+  "generated_slide_count": 7,
+  "kind": "education",
+  "min_sources_required": 1,
+  "needs_external_sources": true,
+  "notes": [
+    "missing required layouts: ['quote']",
+    "source_count 0 < min_sources 1",
+    "visual_quality: unmeasured offline (requires screenshot diff)",
+    "export_parity: unmeasured per-prompt (covered by Phase 6C content tests)",
+    "agent_autonomy: unmeasured offline (requires runtime telemetry)",
+    "stability/security: measured at gate level, not per prompt"
+  ],
+  "prompt": "Create a 7-slide intro lecture deck on transformer attention for a graduate ML class.",
+  "prompt_id": "edu-001",
+  "ran_live": true,
+  "required_layouts_missing": [
+    "quote"
+  ],
+  "required_layouts_present": [
+    "bullets",
+    "closing",
+    "title",
+    "two-col"
+  ],
+  "schema_version": "1.0",
+  "slide_count_in_window": true,
+  "source_count": 0,
+  "timestamp_utc": "2026-05-11T06:56:03.431550+00:00"
+}

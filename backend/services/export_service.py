@@ -94,8 +94,17 @@ class ExportService:
         prs.slide_width = SLIDE_W
         prs.slide_height = SLIDE_H
 
+        # Phase 6AL-Export: prefetch every distinct image URL in parallel.
+        # Pre-6AL this was sequential inside ``_render_slide``: each image
+        # could spend up to 25s x 3 retries = ~80s, so an 8-slide deck with
+        # images on 4-6 slides could take 5+ minutes before the PPTX even
+        # started rendering. The parallel prefetch caps total image-wait at
+        # ~12s regardless of how many slides have images. A missing image
+        # is not fatal: ``_render_slide`` already handles ``None`` bytes.
+        image_cache = self._prefetch_images(slides)
+
         for slide in slides:
-            self._render_slide(prs, slide, palette)
+            self._render_slide(prs, slide, palette, image_cache=image_cache)
 
         buf = io.BytesIO()
         prs.save(buf)
@@ -110,14 +119,26 @@ class ExportService:
         return url, len(data)
 
     def _render_slide(
-        self, prs: Presentation, slide: dict[str, Any], palette: dict[str, str]
+        self,
+        prs: Presentation,
+        slide: dict[str, Any],
+        palette: dict[str, str],
+        *,
+        image_cache: dict[str, bytes | None] | None = None,
     ) -> None:
         layout = (slide.get("layout") or "title").lower()
         s = prs.slides.add_slide(prs.slide_layouts[6])  # blank
         self._add_background(s, palette["bg"])
 
-        # Hero image (best-effort; never blocks export).
-        image_bytes = self._fetch_image(slide.get("image_url"))
+        # Hero image (best-effort; never blocks export). When ``image_cache``
+        # is provided (typical PPTX path) we look up the prefetched bytes
+        # in O(1). Fallback to a direct fetch keeps the method standalone
+        # for callers that bypass ``_export_pptx_sync``.
+        url = slide.get("image_url")
+        if image_cache is not None and url is not None:
+            image_bytes = image_cache.get(url)
+        else:
+            image_bytes = self._fetch_image(url)
         if image_bytes:
             if layout == "closing":
                 # Full-bleed with semi-transparent dark scrim.
@@ -211,21 +232,28 @@ class ExportService:
         else:
             self._render_title(s, slide, palette)
 
-    @staticmethod
-    def _fetch_image(url: str | None) -> bytes | None:
+    # Per-image budget for PPTX exports.
+    # Phase 6AL-Export: tightened from 25s x 3 retries (worst-case ~80s)
+    # to 10s x 2 attempts (worst-case ~12s). A missing image is fine; a
+    # hung export is not. The Pollinations 429 case still gets one retry.
+    _IMAGE_TIMEOUT_S = 10.0
+    _IMAGE_RETRY_DELAYS_S = (0.0, 1.5)
+
+    @classmethod
+    def _fetch_image(cls, url: str | None) -> bytes | None:
         if not url:
             return None
-        # Pollinations can rate-limit (429) on bursts. Retry with light backoff.
-        delays = [0.0, 1.5, 3.5]
-        for attempt, delay in enumerate(delays):
+        for attempt, delay in enumerate(cls._IMAGE_RETRY_DELAYS_S):
             if delay:
                 import time as _t
 
                 _t.sleep(delay)
             try:
-                with httpx.Client(timeout=25.0, follow_redirects=True) as client:
+                with httpx.Client(
+                    timeout=cls._IMAGE_TIMEOUT_S, follow_redirects=True
+                ) as client:
                     r = client.get(url)
-                if r.status_code == 429 and attempt < len(delays) - 1:
+                if r.status_code == 429 and attempt < len(cls._IMAGE_RETRY_DELAYS_S) - 1:
                     continue
                 r.raise_for_status()
                 ct = r.headers.get("content-type", "")
@@ -233,12 +261,47 @@ class ExportService:
                     return None
                 return r.content
             except Exception as exc:
-                if attempt == len(delays) - 1:
+                if attempt == len(cls._IMAGE_RETRY_DELAYS_S) - 1:
                     logger.warning(
                         "export.image_fetch_failed",
                         extra={"err": str(exc), "url": url[:120]},
                     )
         return None
+
+    @classmethod
+    def _prefetch_images(
+        cls, slides: list[dict[str, Any]]
+    ) -> dict[str, bytes | None]:
+        """Fetch every distinct ``image_url`` in parallel.
+
+        Returns a ``{url: bytes-or-None}`` map. Total wall-clock time is
+        bounded by ``_IMAGE_TIMEOUT_S`` x retry count regardless of how
+        many slides have images.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        urls: list[str] = []
+        seen: set[str] = set()
+        for slide in slides:
+            u = slide.get("image_url") if isinstance(slide, dict) else None
+            if isinstance(u, str) and u and u not in seen:
+                seen.add(u)
+                urls.append(u)
+        if not urls:
+            return {}
+
+        cache: dict[str, bytes | None] = {}
+        # Cap concurrency so we do not hammer Pollinations into a 429 storm.
+        max_workers = min(8, len(urls))
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            for u, data in zip(urls, ex.map(cls._fetch_image, urls)):
+                cache[u] = data
+        ok = sum(1 for v in cache.values() if v)
+        logger.info(
+            "export.images_prefetched",
+            extra={"requested": len(urls), "ok": ok, "missing": len(urls) - ok},
+        )
+        return cache
 
     @staticmethod
     def _quickchart_url(slide: dict[str, Any], p: dict[str, str]) -> str:
@@ -363,96 +426,82 @@ class ExportService:
         *,
         image_bytes: bytes | None = None,
     ) -> None:
-        # Manus-style split-screen: text column on the left (~58% wide),
-        # vivid accent panel with a stylized disc on the right (~42% wide).
-        left_w = Inches(7.7)   # 58% of 13.333"
-        right_x = left_w
-        right_w = SLIDE_W - left_w
-
-        # Right panel: solid accent fill
-        panel = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, right_x, 0, right_w, SLIDE_H)
-        panel.line.fill.background()
-        panel.fill.solid()
-        panel.fill.fore_color.rgb = _hex_to_rgb(p["accent"])
-        panel.shadow.inherit = False
-
-        # Optional image inside the right panel (clipped to the panel rect).
+        # Phase 6AL-Visuals: cinematic full-bleed cover.
+        # Pre-6AL composition was a 58/42 split with a solid accent panel
+        # and a sun-glyph disc on the right plus a "POWERED BY NEXUS"
+        # footer band \u2014 the single biggest source of "PowerPoint template"
+        # energy in the export. We now render the image full-bleed (when
+        # available), drape a vertical gradient scrim, and place an
+        # editorial title block in the bottom-left. No disc, no accent
+        # panel, no brand bar.
         if image_bytes:
+            # Full-bleed image
             slide.shapes.add_picture(
                 io.BytesIO(image_bytes),
-                right_x,
-                0,
-                width=right_w,
+                Inches(0),
+                Inches(0),
+                width=SLIDE_W,
                 height=SLIDE_H,
             )
-            # Soft tint so the panel still reads as the accent color.
-            tint = slide.shapes.add_shape(
-                MSO_SHAPE.RECTANGLE, right_x, 0, right_w, SLIDE_H
+            # Dark scrim across the bottom 65% so the title is readable
+            # regardless of the underlying image.
+            scrim_h = Inches(5.0)
+            scrim = slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE,
+                Inches(0),
+                SLIDE_H - scrim_h,
+                SLIDE_W,
+                scrim_h,
             )
-            tint.line.fill.background()
-            tint.fill.solid()
-            tint.fill.fore_color.rgb = _hex_to_rgb(p["accent"])
-            tint.fill.transparency = 0.55
-            tint.shadow.inherit = False
+            scrim.line.fill.background()
+            scrim.fill.solid()
+            scrim.fill.fore_color.rgb = RGBColor(0x00, 0x00, 0x00)
+            scrim.fill.transparency = 0.30
+            scrim.shadow.inherit = False
+            title_color = "#FFFFFF"
+            subtitle_color = "#E5E7EB"
+            eyebrow_color = "#FFFFFF"
+            rule_color = "#FFFFFF"
+        else:
+            # No image: solid background, accent rule under the title.
+            title_color = p["text"]
+            subtitle_color = p["muted"]
+            eyebrow_color = p["accent"]
+            rule_color = p["accent"]
 
-        # Stylized disc in the center of the right panel.
-        disc_size = Inches(3.4)
-        disc_x = right_x + (right_w - disc_size) / 2
-        disc_y = (SLIDE_H - disc_size) / 2
-        disc = slide.shapes.add_shape(MSO_SHAPE.OVAL, disc_x, disc_y, disc_size, disc_size)
-        disc.fill.solid()
-        # Slightly lighter than the accent so it reads as a sun-like glow.
-        disc.fill.fore_color.rgb = _hex_to_rgb(p["accent"])
-        disc.line.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-        disc.line.width = Pt(2)
-        disc.shadow.inherit = False
-
-        # Center glyph on the disc.
-        self._add_text(
-            slide, "\u2726",
-            disc_x, disc_y, disc_size, disc_size,
-            size=56, color="#FFFFFF", bold=True, align="center",
-        )
-
-        # LEFT — eyebrow / title / subtitle / footer
+        # Eyebrow (top-left, widely tracked, all caps).
         eyebrow = (data.get("eyebrow") or "Presentation").upper()
         self._add_text(
             slide, eyebrow,
-            Inches(0.9), Inches(0.8), Inches(6.6), Inches(0.4),
-            size=11, color=p["muted"], bold=True,
+            Inches(0.9), Inches(0.8), Inches(11.5), Inches(0.4),
+            size=11, color=eyebrow_color, bold=True,
         )
 
-        # Title split into two stacked lines (second line in accent color).
+        # Title block bottom-left, single line for editorial drama. We do
+        # NOT split the title into two-colored lines anymore \u2014 that was
+        # template energy. python-pptx will wrap if the title overflows.
         full_title = (data.get("title") or "").strip()
-        words = full_title.split()
-        split_idx = max(1, (len(words) + 1) // 2) if len(words) > 1 else 1
-        title_top = " ".join(words[:split_idx])
-        title_bottom = " ".join(words[split_idx:])
-
         self._add_text(
-            slide, title_top.upper(),
-            Inches(0.9), Inches(2.6), Inches(6.6), Inches(1.2),
-            size=54, color=p["text"], bold=True,
+            slide, full_title,
+            Inches(0.9), Inches(4.6), Inches(11.5), Inches(2.0),
+            size=60, color=title_color, bold=True,
         )
-        if title_bottom:
-            self._add_text(
-                slide, title_bottom.upper(),
-                Inches(0.9), Inches(3.7), Inches(6.6), Inches(1.2),
-                size=54, color=p["accent"], bold=True,
-            )
 
         if data.get("subtitle"):
             self._add_text(
                 slide, data["subtitle"],
-                Inches(0.9), Inches(5.1), Inches(6.6), Inches(1.4),
-                size=16, color=p["muted"],
+                Inches(0.9), Inches(6.6), Inches(11.5), Inches(0.6),
+                size=16, color=subtitle_color,
             )
 
-        self._add_text(
-            slide, "POWERED BY NEXUS",
-            Inches(0.9), Inches(6.7), Inches(6.6), Inches(0.4),
-            size=9, color=p["muted"], bold=True,
+        # Thin accent rule under the title block (editorial signature).
+        rule = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, Inches(0.9), Inches(6.45), Inches(1.3), Inches(0.02)
         )
+        rule.line.fill.background()
+        rule.fill.solid()
+        rule.fill.fore_color.rgb = _hex_to_rgb(rule_color)
+        rule.shadow.inherit = False
 
     def _render_bullets(
         self,

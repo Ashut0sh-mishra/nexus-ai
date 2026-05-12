@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import PromptInput from "./PromptInput.jsx";
 import ImportPptxButton from "./ImportPptxButton.jsx";
+import ImportJsonButton from "./ImportJsonButton.jsx";
 import { api } from "../utils/api.js";
 import { Sparkles } from "lucide-react";
 import { MODES, STATUS_BADGE } from "../config/modes.js";
@@ -116,6 +117,7 @@ export default function Hero() {
             More
           </button>
           <ImportPptxButton />
+          <ImportJsonButton />
         </div>
       </div>
     </section>

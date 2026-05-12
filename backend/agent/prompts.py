@@ -178,23 +178,45 @@ def _render_strategy_block(strategy: Any) -> str:
         return ""
 
 
+def _render_narrative_block(narrative: Any) -> str:
+    """Render a NarrativeDraft as a compact prompt block (Phase 6AN-Story).
+
+    Returns ``""`` for falsy/empty drafts so the legacy outline-only
+    path is recovered by any caller that doesn't pass a narrative.
+    """
+    if narrative is None:
+        return ""
+    try:
+        from agent.narrative_synthesizer import narrative_block
+        block = narrative_block(narrative)
+        return ("\n\n" + block) if block else ""
+    except Exception:
+        return ""
+
+
 def planner_user_message(
     topic: str,
     slide_count: int,
     research: str,
     *,
     strategy: Any | None = None,
+    narrative: Any | None = None,
 ) -> str:
     research_block = (
         f"\n\nResearch findings:\n{research.strip()}" if research.strip() else ""
     )
     strategy_block = _render_strategy_block(strategy)
+    narrative_block_text = _render_narrative_block(narrative)
     return (
         f"Topic: {topic}\n"
-        f"Slides: {slide_count}{research_block}{strategy_block}\n\n"
+        f"Slides: {slide_count}{research_block}{strategy_block}{narrative_block_text}\n\n"
         f"Generate exactly {slide_count} slide plans. "
         f"Honour the deck strategy above when present: the layout_recipe is the "
         f"target ordering, and the story_arc tells you what each slide must prove. "
+        f"When a Narrative draft is supplied, treat it as the deck's ground "
+        f"truth: each slide must map to one section of the narrative, in order, "
+        f"and the slide titles must echo that section's point \u2014 do not "
+        f"introduce slides that contradict or step outside the narrative. "
         f"You MUST include exactly one slide with layout=\"chart\" "
         f"whenever the deck involves trends, market sizing, comparisons, or time series. "
         f"Place it between slides 2 and {slide_count - 1}. "
@@ -209,6 +231,7 @@ def slides_user_message(
     outline: str,
     *,
     strategy: Any | None = None,
+    narrative: Any | None = None,
 ) -> str:
     research_block = (
         f"\n\nResearch findings:\n{research.strip()}" if research.strip() else ""
@@ -217,12 +240,22 @@ def slides_user_message(
         f"\n\nOutline (follow it strictly):\n{outline.strip()}" if outline else ""
     )
     strategy_block = _render_strategy_block(strategy)
+    narrative_block_text = _render_narrative_block(narrative)
+    narrative_rule = (
+        " Each slide must condense ONE section of the Narrative draft above, "
+        "in order. The thesis is the deck's spine — every slide serves it. "
+        "Do not introduce facts, names, or numbers that do not appear in the "
+        "narrative or the research findings."
+        if narrative_block_text
+        else ""
+    )
     return (
         f"Topic: {topic}\n"
-        f"Slides: {slide_count}{research_block}{strategy_block}{outline_block}\n\n"
+        f"Slides: {slide_count}{research_block}{strategy_block}{narrative_block_text}{outline_block}\n\n"
         f"Generate exactly {slide_count} slides. "
         f"Use the deck strategy above for tone, audience framing, image direction, "
-        f"and chart guidance. Ground every claim in the research findings or key facts. "
+        f"and chart guidance. Ground every claim in the research findings or key facts."
+        f"{narrative_rule} "
         f"Make each slide earn its place — if a slide could be cut without losing "
         f"anything essential, rewrite it until it cannot. "
         f"Return only the JSON array."

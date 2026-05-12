@@ -67,17 +67,28 @@ async def _run(task_id: str, min_sources: int = 0) -> None:
 
     from agent.loop import NexusAgentLoop
     from services.lifecycle_service import JobCancelled, mark_cancelled
+    from workers.runtime_trail import maybe_wrap_for_runtime_trail
 
     task = await _load_task(task_id)
     if task is None:
         logger.error("tasks.task_not_found", extra={"task_id": task_id})
         return
 
-    publisher = _make_publisher(task_id)
+    inner_publisher = _make_publisher(task_id)
+    # Phase 6AG: if the API opened a pipeline-trail AgentRun for this task
+    # (because NEXUS_RUNTIME_DRIVES_GENERATE=true), wrap the publisher so
+    # each pipeline milestone is mirrored onto AgentStep rows and the run
+    # is finalised when the loop terminates. ``observer`` is ``None`` when
+    # no run was opened — the legacy callback is then used verbatim.
+    publisher, observer = await maybe_wrap_for_runtime_trail(task_id, inner_publisher)
     loop = NexusAgentLoop()
     # Hard ceiling: a hung provider call must never freeze a Celery worker.
-    # 8 slides x ~30s/slide worst-case + overhead = 5 min ceiling.
-    TASK_TIMEOUT_SECONDS = 300
+    # 12 slides x ~30s/slide worst-case + provider 429 backoff/retries + overhead
+    # = 10 min ceiling. Raised from 300s after Phase 6U-Rebench observed
+    # `tasks.timeout` on the two 12-slide prompts (mkt-001, evid-001) under
+    # Groq + OpenRouter 429 cascades. Still bounded so a hung provider cannot
+    # freeze a Celery worker indefinitely.
+    TASK_TIMEOUT_SECONDS = 600
     try:
         await asyncio.wait_for(
             loop.run(
@@ -100,6 +111,8 @@ async def _run(task_id: str, min_sources: int = 0) -> None:
             logger.exception(
                 "tasks.mark_cancelled_failed", extra={"task_id": task_id}
             )
+        if observer is not None:
+            await observer.finalize_unexpected(status="cancelled", error="job_cancelled")
     except asyncio.TimeoutError:
         logger.error("tasks.timeout", extra={"task_id": task_id, "limit": TASK_TIMEOUT_SECONDS})
         await publisher(
@@ -122,6 +135,8 @@ async def _run(task_id: str, min_sources: int = 0) -> None:
                     await session.commit()
         except Exception:
             pass
+        if observer is not None:
+            await observer.finalize_unexpected(status="failed", error="timeout")
     finally:
         try:
             await _async_engine.dispose()

@@ -1,0 +1,45 @@
+{
+  "all_required_layouts_present": true,
+  "category_scores": {
+    "agent_autonomy": null,
+    "deck_correctness": 10,
+    "evidence_accuracy": 7,
+    "export_parity": null,
+    "security_production_readiness": null,
+    "stability_reliability": null,
+    "visual_quality": null
+  },
+  "chart_present": true,
+  "chart_required": false,
+  "chart_requirement_met": true,
+  "deck_quality_invalid_count": 0,
+  "deck_quality_ok": true,
+  "difficulty": "medium",
+  "external_source_expectation_met": true,
+  "fixture_label": null,
+  "generated_slide_count": 8,
+  "kind": "product_launch",
+  "min_sources_required": 0,
+  "needs_external_sources": false,
+  "notes": [
+    "visual_quality: unmeasured offline (requires screenshot diff)",
+    "export_parity: unmeasured per-prompt (covered by Phase 6C content tests)",
+    "agent_autonomy: unmeasured offline (requires runtime telemetry)",
+    "stability/security: measured at gate level, not per prompt"
+  ],
+  "prompt": "Generate an 8-slide product launch deck for a new AI document-summarization feature targeting enterprise legal users.",
+  "prompt_id": "prod-001",
+  "ran_live": true,
+  "required_layouts_missing": [],
+  "required_layouts_present": [
+    "bullets",
+    "closing",
+    "stats",
+    "title",
+    "two-col"
+  ],
+  "schema_version": "1.0",
+  "slide_count_in_window": true,
+  "source_count": 3,
+  "timestamp_utc": "2026-05-11T06:59:32.238894+00:00"
+}

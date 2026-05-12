@@ -57,13 +57,20 @@ async def _record_runtime_dispatch(
     payload: "GenerateRequest",
     trace_id: str,
 ) -> Optional[str]:
-    """Phase 6I — persist an AgentRun + thought step for this generate call.
+    """Phase 6AG — open a real, long-lived AgentRun for this generation.
 
-    Returns the run id if persistence (or recorded-failure) succeeded.
-    Returns ``None`` only if the AgentRun row itself could not be created.
-    A persistence failure inside the run is captured by marking the run
-    ``failed`` rather than crashing the API. This function commits its own
-    transactions; the route must commit Task before calling it.
+    Pre-6AG (Phase 6I) only recorded a stub "dispatch trail" that was
+    finalised immediately, so the runtime tables held no information about
+    the actual deck pipeline. From 6AG the API instead **opens** a run
+    (status ``running``) with a single ``thought`` dispatch step, and the
+    Celery worker reads that run, appends pipeline-phase steps, and
+    finalises it when generation succeeds or fails. The visible contract
+    of ``/api/generate`` is unchanged: 202 + ``{task_id, status,
+    agent_run_id?}``.
+
+    Returns the run id if the AgentRun row itself was created (whether or
+    not the dispatch step persisted), so the worker can locate it. Returns
+    ``None`` only if the AgentRun row could not be created.
     """
     # Local imports keep the route cheap when the flag is off.
     from agent.runtime import RuntimeConfig
@@ -77,11 +84,12 @@ async def _record_runtime_dispatch(
             user_id=user_id,
             max_steps=RuntimeConfig().max_steps,
             meta={
-                "phase": "6I",
-                "dispatch_only": True,
+                "phase": "6AG",
+                "mode": "pipeline_trail",
                 "theme": payload.theme,
                 "slide_count": payload.slide_count,
                 "search_web": payload.search_web,
+                "min_sources": payload.min_sources,
             },
         )
         await db.commit()
@@ -98,6 +106,7 @@ async def _record_runtime_dispatch(
             db,
             run_id=run.id,
             kind="thought",
+            action="dispatch_celery",
             input_json={
                 "dispatch": "celery",
                 "topic_preview": payload.topic[:200],
@@ -106,12 +115,14 @@ async def _record_runtime_dispatch(
                 "search_web": payload.search_web,
             },
         )
-        await finish_run(db, run_id=run.id, status="done")
         await db.commit()
     except Exception as exc:
+        # Step persistence failed; mark the run failed so the trail
+        # accurately reflects the broken dispatch instead of dangling
+        # forever in ``running``.
         await db.rollback()
         logger.warning(
-            "generate.runtime_dispatch.step_or_finish_failed",
+            "generate.runtime_dispatch.step_failed",
             extra={"trace_id": trace_id, "task_id": task_id, "err": str(exc)},
         )
         try:

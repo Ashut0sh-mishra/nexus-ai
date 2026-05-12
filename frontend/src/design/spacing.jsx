@@ -10,18 +10,24 @@ import { space } from "./tokens.js";
 
 // ─── Semantic spacing ───────────────────────────────────────────────────────
 // Slide-canvas-level rhythm. Tweak here, and every layout obeys.
+// Phase 6AI-B3 — wider outer padding + breathing room around titles for
+// a more editorial feel. Card internals unchanged.
 export const slideSpacing = Object.freeze({
   // Outer padding for the slide content area (16:9 canvas).
-  padX: space[12], //  3rem  — 48px
-  padY: space[10], // 2.5rem — 40px
+  padX: space[14], //  3.5rem — was 3rem
+  padY: space[12], //  3rem   — was 2.5rem
+  // Hero canvas (bigstat / section_divider) gets oversized padding to
+  // signal narrative pause. Renderer code can opt-in to these.
+  heroPadX: space[16], // 4rem
+  heroPadY: space[14], // 3.5rem
   // Major vertical breaks inside the slide.
   sectionGap: space[8],   // 2rem    — between hero block and detail block
   blockGap: space[6],     // 1.5rem  — between content blocks
   // Title rhythm
-  eyebrowToTitle: space[2], // 0.5rem
-  titleToBody: space[6],    // 1.5rem
+  eyebrowToTitle: space[3], // 0.75rem — was 0.5rem
+  titleToBody: space[7],    // 1.75rem — was 1.5rem
   titleToSubtitle: space[3],// 0.75rem
-  subtitleToBody: space[6], // 1.5rem
+  subtitleToBody: space[7], // 1.75rem — was 1.5rem
   // Card internals
   cardPad: space[5],   // 1.25rem
   cardGap: space[3],   // 0.75rem
@@ -31,14 +37,16 @@ export const slideSpacing = Object.freeze({
 // Tailwind class equivalents — for callers that prefer className.
 // Keep in lock-step with the rem values above.
 export const slideSpacingClass = Object.freeze({
-  padX: "px-12",
-  padY: "py-10",
+  padX: "px-14",
+  padY: "py-12",
+  heroPadX: "px-16",
+  heroPadY: "py-14",
   sectionGap: "gap-8",
   blockGap: "gap-6",
-  eyebrowToTitle: "mb-2",
-  titleToBody: "mb-6",
+  eyebrowToTitle: "mb-3",
+  titleToBody: "mb-7",
   titleToSubtitle: "mb-3",
-  subtitleToBody: "mb-6",
+  subtitleToBody: "mb-7",
   cardPad: "p-5",
   cardGap: "gap-3",
   cardBlockGap: "gap-4",

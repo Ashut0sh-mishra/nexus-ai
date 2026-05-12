@@ -42,6 +42,38 @@ export function normalizeSlide(raw, index = 0) {
     // slide renderer itself ignores this field — it's only consumed by
     // SourceEvidencePanel.
     sources: Array.isArray(raw.sources) ? raw.sources : [],
+    // Phase 6AF: per-slide claim-level citations attached by the backend
+    // pipeline (services.claim_citation_service via agent.citation_attach).
+    // Each entry is { path, claim_text, marker, supported, basis, score,
+    // source_id, source_url, source_title }. SlideRenderer reads `marker`
+    // to draw small superscripts next to bullets/stats; CitationsPanel
+    // continues to fetch the deck-level report from the API for the full
+    // grouped view.
+    citations: Array.isArray(raw.citations) ? raw.citations : [],
+    // Phase 6AH-A1: per-slide intent metadata produced by the backend
+    // pipeline (agent/slide_intent.py). Used by StorylineRibbon and the
+    // upcoming reasoning drawer to surface the agent's narrative plan.
+    // The slide renderer itself ignores this field; renderer code path
+    // is unchanged.
+    intent:
+      raw.intent && typeof raw.intent === "object" && !Array.isArray(raw.intent)
+        ? {
+            narrative_role: raw.intent.narrative_role || "",
+            tone: raw.intent.tone || "",
+            density: raw.intent.density || "",
+            communication_goal: raw.intent.communication_goal || "",
+          }
+        : null,
+    // Phase 6AJ: short narrative bridge written by editorial_pass when
+    // consecutive slides have an intent.narrative_role. ≤ 9 words.
+    // Surfaced in SlideReasoningDrawer; renderers ignore it.
+    transition: typeof raw.transition === "string" ? raw.transition : "",
+    // Phase 6AK: cinematic hero marker set by agent.cinematic_marker.
+    // Renderer-only signal — bigstat / section_divider / attributed-quote
+    // slides whose `is_hero === true` are promoted to full-bleed
+    // cinematic variants. Exporters and the canonical layout contract
+    // ignore this field.
+    is_hero: raw.is_hero === true,
   };
   switch (layout) {
     case "bullets":

@@ -25,9 +25,11 @@ export const space = Object.freeze({
   4: "1rem",    // 16px — default body gap
   5: "1.25rem", // 20px — card padding
   6: "1.5rem",  // 24px — block gap
+  7: "1.75rem", // 28px — title→body editorial breathing (Phase 6AI-B3)
   8: "2rem",    // 32px — section gap
   10: "2.5rem", // 40px — slide vertical padding
   12: "3rem",   // 48px — slide horizontal padding
+  14: "3.5rem", // 56px — wider editorial outer padding (Phase 6AI-B3)
   16: "4rem",   // 64px — title→body breathing room on hero layouts
   20: "5rem",   // 80px — major section breaks
   24: "6rem",   // 96px — outer canvas margins

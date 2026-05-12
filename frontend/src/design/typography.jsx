@@ -10,10 +10,13 @@
 // full-screen export PNGs. Sizes are tuned for the 16:9 slide canvas.
 
 // ─── Scale (raw values for inline style or python mirror) ───────────────────
+// Phase 6AI-B2 — widened display→body ratio for more cinematic hierarchy.
+// Display + h1 sizes scale higher and tighter; body sizes are unchanged so
+// reading remains comfortable. Letter-spacing tightens on the upper end.
 export const typeScale = Object.freeze({
-  display: { size: "clamp(2.75rem, 5vw, 4.5rem)", weight: 800, lh: 1.05, tracking: "-0.02em" },
-  h1:      { size: "clamp(2.25rem, 4vw, 3.5rem)", weight: 800, lh: 1.1,  tracking: "-0.015em" },
-  h2:      { size: "clamp(1.75rem, 3vw, 2.5rem)", weight: 700, lh: 1.15, tracking: "-0.01em" },
+  display: { size: "clamp(3rem, 6vw, 5.5rem)",     weight: 800, lh: 1.0,  tracking: "-0.025em" },
+  h1:      { size: "clamp(2.5rem, 4.5vw, 4rem)",   weight: 800, lh: 1.05, tracking: "-0.02em" },
+  h2:      { size: "clamp(1.875rem, 3.2vw, 2.75rem)", weight: 700, lh: 1.12, tracking: "-0.012em" },
   h3:      { size: "clamp(1.25rem, 2vw, 1.75rem)", weight: 700, lh: 1.2,  tracking: "-0.005em" },
   h4:      { size: "clamp(1rem, 1.4vw, 1.25rem)",   weight: 700, lh: 1.3,  tracking: "0" },
   body:    { size: "clamp(0.875rem, 1.1vw, 1rem)",  weight: 400, lh: 1.55, tracking: "0" },
