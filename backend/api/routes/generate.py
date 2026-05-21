@@ -206,6 +206,25 @@ async def create_generation_task(
             trace_id=trace_id,
         )
 
+    # Phase 6AN — single-container deploys (HF Spaces) run generation
+    # in-process via asyncio instead of a separate Celery worker. The web
+    # process publishes SSE progress through the same local Redis, so the
+    # status stream is unchanged. Default-off keeps the Celery path for
+    # docker-compose / Fly with a dedicated worker.
+    if settings.NEXUS_INLINE_GENERATION:
+        import asyncio
+
+        from workers.inline import run_generation_inline
+
+        asyncio.create_task(run_generation_inline(task.id, payload.min_sources))
+        logger.info(
+            "generate.inline_dispatched",
+            extra={"trace_id": trace_id, "task_id": task.id, "topic": payload.topic[:80]},
+        )
+        return GenerateResponse(
+            task_id=task.id, status="pending", agent_run_id=agent_run_id
+        )
+
     # Enqueue async work. Import locally so the API process doesn't pull in
     # heavy worker-only deps (browser_use / playwright) on cold start.
     try:

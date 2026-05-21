@@ -56,7 +56,8 @@ ENV ENVIRONMENT=production \
     PORT=7860 \
     AI_PROVIDER_CHAIN=groq,nvidia_nim,sambanova \
     DATABASE_URL=sqlite+aiosqlite:///./nexus.db \
-    REDIS_URL=redis://localhost:6379/0
+    REDIS_URL=redis://localhost:6379/0 \
+    NEXUS_INLINE_GENERATION=true
 
 EXPOSE 7860
 

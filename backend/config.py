@@ -164,6 +164,12 @@ class Settings(BaseSettings):
     #     python -c "import secrets; print(secrets.token_urlsafe(48))"
     NEXUS_API_KEY: str = ""
 
+    # Phase 6AN — run generation in-process (asyncio) instead of dispatching
+    # to a separate Celery worker. Set true on single-container deploys
+    # (Hugging Face Spaces) where a dedicated worker is unreliable. Default
+    # false preserves the Celery path for docker-compose / Fly.
+    NEXUS_INLINE_GENERATION: bool = False
+
     # ── MONITORING ─────────────────────────────
     SENTRY_DSN: str = ""
     LOG_LEVEL: str = "INFO"
