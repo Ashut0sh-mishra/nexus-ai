@@ -1,0 +1,16 @@
+# GitHub Linguist — exclude reference/vendored material from the repo's
+# language statistics so the bar reflects the ACTUAL project code
+# (Python backend + React/JS frontend), not scraped websites or
+# third-party open-source references.
+
+# Scraped public Manus website HTML — competitive reference only, not code.
+manus-reference/** linguist-vendored
+manus-reference/** linguist-documentation
+
+# Third-party open-source reference projects (OpenManus, Suna, browser-use,
+# Presenton, AgenticSeek, etc.) — studied for ideas, not our source.
+manus-need/** linguist-vendored
+
+# Built / generated artifacts (when present) should never count as source.
+frontend/dist/** linguist-generated
+**/*.min.js linguist-generated
