@@ -39,6 +39,7 @@ services:
   - type: web
     name: nexus-backend
     runtime: docker
+    repo: https://github.com/Ashut0sh-mishra/nexus-ai
     plan: free
     region: oregon           # change to your nearest: oregon | frankfurt | singapore
     dockerfilePath: ./backend/Dockerfile
@@ -92,6 +93,7 @@ services:
   - type: web
     name: nexus-frontend
     runtime: static
+    repo: https://github.com/Ashut0sh-mishra/nexus-ai
     buildCommand: cd frontend && npm ci && npm run build
     staticPublishPath: ./frontend/dist
     autoDeploy: true
