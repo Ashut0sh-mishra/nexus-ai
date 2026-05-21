@@ -38,3 +38,20 @@ api.interceptors.response.use(
 export function statusStreamUrl(taskId) {
   return `${normalizedBase}/status/${encodeURIComponent(taskId)}`;
 }
+
+/**
+ * Resolve a backend-relative path (e.g. an export `download_url` like
+ * "/api/files/xyz.pptx") to an ABSOLUTE URL on the backend origin.
+ *
+ * Without this, a relative URL resolves against the *frontend* origin
+ * (the Vercel app), whose SPA rewrite returns index.html for unknown
+ * paths — so "Download PPTX" downloaded index.html instead of the file.
+ * Already-absolute (http/https) URLs pass through unchanged.
+ */
+export function backendUrl(pathOrUrl) {
+  if (!pathOrUrl) return pathOrUrl;
+  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
+  // normalizedBase ends with "/api"; the backend origin is it minus "/api".
+  const origin = normalizedBase.replace(/\/api$/, "");
+  return `${origin}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`;
+}

@@ -2,6 +2,7 @@ import { useState } from "react";
 import toast from "react-hot-toast";
 import { Download, FileDown, Link2, Loader2 } from "lucide-react";
 import { useExport } from "../hooks/useExport.js";
+import { backendUrl } from "../utils/api.js";
 import ShareModal from "./ShareModal.jsx";
 
 export default function ExportButtons({ taskId, theme }) {
@@ -43,11 +44,11 @@ export default function ExportButtons({ taskId, theme }) {
     try {
       if (kind === "pptx") {
         const { download_url } = await exportPptx(taskId, theme);
-        triggerDownload(download_url, `${taskId}.pptx`);
+        triggerDownload(backendUrl(download_url), `${taskId}.pptx`);
         toast.success("PPTX ready.", { id: `export-slow-${kind}` });
       } else if (kind === "pdf") {
         const { download_url } = await exportPdf(taskId, theme);
-        triggerDownload(download_url, `${taskId}.pdf`);
+        triggerDownload(backendUrl(download_url), `${taskId}.pdf`);
         toast.success("PDF ready.", { id: `export-slow-${kind}` });
       } else if (kind === "share") {
         const { share_url } = await createShare(taskId);
