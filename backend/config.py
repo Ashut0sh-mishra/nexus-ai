@@ -145,6 +145,14 @@ class Settings(BaseSettings):
     BACKEND_URL: str = "http://localhost:8000"
     DEBUG: bool = True
 
+    # ── SECURITY (Phase 6AL) ────────────────────
+    # Shared secret between the deployed backend and the deployed
+    # frontend. Empty in local dev = the SecurityMiddleware is a no-op.
+    # In production this MUST be set (the same value as the frontend's
+    # VITE_NEXUS_KEY build-time env var). Generate with:
+    #     python -c "import secrets; print(secrets.token_urlsafe(48))"
+    NEXUS_API_KEY: str = ""
+
     # ── MONITORING ─────────────────────────────
     SENTRY_DSN: str = ""
     LOG_LEVEL: str = "INFO"

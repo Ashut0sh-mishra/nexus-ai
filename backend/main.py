@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from config import settings
 from api.middleware import RequestContextMiddleware, configure_logging
+from api.security import SecurityMiddleware
 from api.routes import (
     agent,
     auth,
@@ -72,8 +73,19 @@ app.add_middleware(
     allow_origins=[settings.FRONTEND_URL, "http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    # Explicit header allow-list so the new X-Nexus-Key header passes preflight.
+    # CORSMiddleware does not accept wildcards alongside allow_credentials=True.
+    allow_headers=[
+        "authorization",
+        "content-type",
+        "x-nexus-key",
+        "x-requested-with",
+    ],
 )
+# Phase 6AL — shared-key gate + per-IP rate limit. No-op when
+# settings.NEXUS_API_KEY is empty (local dev). Activates automatically
+# when the secret is set in the production environment.
+app.add_middleware(SecurityMiddleware)
 app.add_middleware(RequestContextMiddleware)
 
 # Static files for local-storage exports (used when R2 is not configured).

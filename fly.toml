@@ -1,0 +1,55 @@
+# Fly.io app config — backend + Celery worker run as two process types
+# from the same Docker image. Each process gets its own (tiny) Fly machine
+# so they scale independently but share build cache.
+#
+# Total cost on shared-cpu-1x@256MB:
+#   • backend  ≈ $1.94/mo
+#   • worker   ≈ $1.94/mo
+# Both covered by Fly's $5/month free credit. Postgres + Redis are
+# hosted off-Fly (Neon + Upstash) and are also free.
+
+app = "nexus-ai"
+primary_region = "iad"   # change to your closest region (e.g. "sin", "lhr", "fra")
+
+[build]
+  dockerfile = "backend/Dockerfile"
+  build_target = ""
+
+[env]
+  ENVIRONMENT = "production"
+  LOG_LEVEL = "INFO"
+  BROWSER_ENABLED = "false"
+  PORT = "8000"
+
+# Two process types, one image. `fly deploy` builds once and Fly schedules
+# both onto their own machines. Override the entrypoint per-process.
+[processes]
+  app    = "uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1"
+  worker = "celery -A workers.celery_app.celery worker --loglevel=info --concurrency=2"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"   # spin down when idle to conserve credit
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]            # only the web process exposes HTTP
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 20
+    hard_limit = 40
+
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "10s"
+  method = "GET"
+  path = "/api/health"
+
+# Both processes get the same VM size. 256MB is enough for one worker
+# + the Python interpreter; bump to 512MB if PPTX exports OOM.
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256

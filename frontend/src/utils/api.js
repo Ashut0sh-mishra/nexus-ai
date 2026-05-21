@@ -6,6 +6,12 @@ const normalizedBase =
     ? baseURL.replace(/\/$/, "")
     : `${baseURL.replace(/\/$/, "")}/api`;
 
+// Phase 6AL — shared key baked at build time. The deployed backend's
+// SecurityMiddleware rejects any request that does not carry this exact
+// value in the X-Nexus-Key header. Empty in local dev = no header sent
+// (backend's middleware is a no-op when NEXUS_API_KEY is empty there).
+const NEXUS_KEY = import.meta.env.VITE_NEXUS_KEY || "";
+
 export const api = axios.create({
   baseURL: normalizedBase,
   timeout: 60_000,
@@ -14,6 +20,7 @@ export const api = axios.create({
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("nexus_token");
   if (token) config.headers.Authorization = `Bearer ${token}`;
+  if (NEXUS_KEY) config.headers["X-Nexus-Key"] = NEXUS_KEY;
   return config;
 });
 
