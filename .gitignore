@@ -53,3 +53,7 @@ docker-data/
 # -- large local-only archives (kept outside git) -
 manus-need.zip
 
+
+# deploy tokens (never commit)
+.hf_token
+*.token
