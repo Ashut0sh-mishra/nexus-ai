@@ -87,6 +87,40 @@ export function makeBlankSlide(layout = "bullets") {
         eyebrow: "",
         cta: "",
       };
+    case "bigstat":
+      return {
+        ...base,
+        title: "Headline number",
+        value: "00",
+        label: "Metric",
+        subtitle: "",
+      };
+    case "section_divider":
+      return {
+        ...base,
+        title: "New section",
+        eyebrow: "",
+        subtitle: "",
+      };
+    case "timeline":
+      return {
+        ...base,
+        title: "Timeline",
+        subtitle: "",
+        events: [
+          { date: "2023", label: "First milestone" },
+          { date: "2024", label: "Second milestone" },
+          { date: "2025", label: "Third milestone" },
+        ],
+      };
+    case "comparison":
+      return {
+        ...base,
+        title: "Comparison",
+        subtitle: "",
+        left: { heading: "Side A", body: "Body A" },
+        right: { heading: "Side B", body: "Body B" },
+      };
     default:
       return {
         ...base,
@@ -221,6 +255,65 @@ export function convertSlideLayout(slide, nextLayout) {
         subtitle: typeof slide.subtitle === "string" ? slide.subtitle : "",
         cta: typeof slide.cta === "string" ? slide.cta : "",
       };
+    case "bigstat": {
+      // Carry a value from an existing stats slide if present.
+      const firstStat = Array.isArray(slide.stats) && slide.stats[0] ? slide.stats[0] : null;
+      const val = slide.value != null && String(slide.value).trim()
+        ? String(slide.value)
+        : firstStat && String(firstStat.value ?? "").trim()
+          ? String(firstStat.value)
+          : blank.value;
+      return {
+        ...blank,
+        ...carried,
+        title: carryTitle || blank.title,
+        value: val,
+        label: slide.label || (firstStat && firstStat.label) || "",
+        subtitle: typeof slide.subtitle === "string" ? slide.subtitle : "",
+      };
+    }
+    case "section_divider":
+      return {
+        ...blank,
+        ...carried,
+        title: carryTitle || blank.title,
+        eyebrow: typeof slide.eyebrow === "string" ? slide.eyebrow : "",
+        subtitle: typeof slide.subtitle === "string" ? slide.subtitle : "",
+      };
+    case "timeline": {
+      const ev = Array.isArray(slide.events) ? slide.events : [];
+      const safe = ev
+        .slice(0, 6)
+        .map((e) => ({
+          date: e?.date && String(e.date).trim() ? String(e.date) : "—",
+          label: e?.label && String(e.label).trim() ? String(e.label) : "Event",
+        }));
+      return {
+        ...blank,
+        ...carried,
+        title: carryTitle || blank.title,
+        subtitle: typeof slide.subtitle === "string" ? slide.subtitle : "",
+        events: safe.length ? safe : blank.events,
+      };
+    }
+    case "comparison": {
+      const l = slide.left && typeof slide.left === "object" ? slide.left : {};
+      const r = slide.right && typeof slide.right === "object" ? slide.right : {};
+      return {
+        ...blank,
+        ...carried,
+        title: carryTitle || blank.title,
+        subtitle: typeof slide.subtitle === "string" ? slide.subtitle : "",
+        left: {
+          heading: l.heading && l.heading.trim() ? l.heading : "Side A",
+          body: l.body && l.body.trim() ? l.body : "Body A",
+        },
+        right: {
+          heading: r.heading && r.heading.trim() ? r.heading : "Side B",
+          body: r.body && r.body.trim() ? r.body : "Body B",
+        },
+      };
+    }
     default:
       return blank;
   }
@@ -234,4 +327,8 @@ export const SUPPORTED_LAYOUTS = [
   "stats",
   "chart",
   "closing",
+  "bigstat",
+  "section_divider",
+  "timeline",
+  "comparison",
 ];

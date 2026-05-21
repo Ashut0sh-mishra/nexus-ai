@@ -137,6 +137,44 @@ export function normalizeSlide(raw, index = 0) {
     }
     case "closing":
       return { ...base, cta: raw.cta || "" };
+    // Phase 6AA — single dominant metric. ``value`` is REQUIRED (non-empty)
+    // by the backend validator; preserving it here is what fixes the
+    // load→save 400 (the slide previously fell through to `default` and
+    // lost `value`/`label`).
+    case "bigstat":
+      return {
+        ...base,
+        value: raw.value != null ? String(raw.value) : "",
+        label: raw.label || "",
+      };
+    // Phase 6AA — typography pause. Only needs title + eyebrow + subtitle,
+    // all already on `base`; declared explicitly for clarity.
+    case "section_divider":
+      return base;
+    // Phase 6AC — chronology. ``events`` (list of {date, label}) is required.
+    case "timeline":
+      return {
+        ...base,
+        events: Array.isArray(raw.events)
+          ? raw.events.slice(0, 6).map((e) => ({
+              date: e?.date || "",
+              label: e?.label || "",
+            }))
+          : [],
+      };
+    // Phase 6AC — side-by-side comparison. ``left``/``right`` blocks required.
+    case "comparison":
+      return {
+        ...base,
+        left: {
+          heading: raw.left?.heading || "",
+          body: raw.left?.body || "",
+        },
+        right: {
+          heading: raw.right?.heading || "",
+          body: raw.right?.body || "",
+        },
+      };
     default:
       return base;
   }
