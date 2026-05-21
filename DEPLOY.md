@@ -1,5 +1,93 @@
 # NEXUS — Free Production Deploy Guide
 
+Two free paths:
+
+- **Render Blueprint (FASTEST — recommended, ~5 min, no CLI)** — one repo
+  connect provisions backend+worker, frontend, Postgres, and Redis from the
+  committed `render.yaml`. See **§ Render fast path** immediately below.
+- **Fly.io + Vercel** (always-on, no cold starts, needs CLI) — see § A onward.
+
+---
+
+## ⚡ Render fast path (do this)
+
+Everything is committed (`render.yaml`, `backend/start-render.sh`). You only
+sign in and paste secrets — no CLI, no Docker, no local tooling.
+
+### Step 1 — rotate keys, then have these ready
+
+The exposed keys MUST be rotated first (see § 0 below). Then keep these values
+to paste in step 3. Your freshly generated app secrets (use these as-is):
+
+```
+SECRET_KEY=ff5166ea92051af656852b40ff658d7dbc3f186303d20b8aeff5501059c89811
+NEXUS_API_KEY=WCifgvDIHcCpeqGqjXyiD--ZCtbrMpiaHjlnV2wYC6RgRnm3WmyoLp_vmjqX0EmI
+```
+
+(If you'd rather not reuse secrets printed in a doc, regenerate with
+`python -c "import secrets;print(secrets.token_urlsafe(48))"` — just use the
+SAME `NEXUS_API_KEY` for both the backend env var and the frontend
+`VITE_NEXUS_KEY`.)
+
+### Step 2 — create the Blueprint
+
+1. Sign up at https://render.com with your GitHub account.
+2. Dashboard → **New +** → **Blueprint**.
+3. Pick the repo **`Ashut0sh-mishra/nexus-ai`** → **Apply**.
+4. Render reads `render.yaml` and creates 4 things: `nexus-backend`,
+   `nexus-frontend`, `nexus-db` (Postgres), `nexus-redis`. `DATABASE_URL`
+   and `REDIS_URL` are wired automatically.
+
+### Step 3 — paste the secrets
+
+When prompted (or under each service → Environment), set the `sync: false`
+vars on **nexus-backend**:
+
+| Key | Value |
+|---|---|
+| `SECRET_KEY` | (from step 1) |
+| `NEXUS_API_KEY` | (from step 1) |
+| `GROQ_API_KEY` | your **rotated** key |
+| `NVIDIA_NIM_API_KEY` | your **rotated** key |
+| `SAMBANOVA_API_KEY` | your key |
+| `ANTHROPIC_API_KEY` | optional (paid fallback) |
+| `TAVILY_API_KEY` | optional (web research) |
+| `SERPER_API_KEY` | optional |
+
+### Step 4 — connect the two URLs
+
+After the first deploy Render shows your hostnames
+(`https://nexus-backend.onrender.com`, `https://nexus-frontend.onrender.com`).
+
+- On **nexus-backend** set: `FRONTEND_URL = https://nexus-frontend.onrender.com`
+- On **nexus-frontend** set:
+  - `VITE_BACKEND_URL = https://nexus-backend.onrender.com`
+  - `VITE_NEXUS_KEY = ` (the same `NEXUS_API_KEY` value)
+- Click **Manual Deploy → Clear cache & deploy** on both (so the frontend
+  bundle bakes in the key, and CORS picks up the frontend origin).
+
+### Step 5 — verify
+
+```
+curl https://nexus-backend.onrender.com/api/health     # {"status":"ok",...}
+open  https://nexus-frontend.onrender.com              # the app
+```
+
+Done. `git push main` now auto-redeploys both (autoDeploy: true).
+
+**Render free-tier caveats (acceptable for a demo / invite-only):**
+- Backend spins down after ~15 min idle → first request after sleep cold-starts
+  in ~30–60s. Fine for dogfooding; annoying for a public launch.
+- Free Postgres expires after the trial window — migrate to **Neon** (free
+  forever, § 1 below) when it does: just swap `DATABASE_URL`.
+- 512MB RAM cap → Celery runs at concurrency=1 (set in `start-render.sh`).
+
+For always-on with no cold starts, use the Fly.io path below instead.
+
+---
+
+# (Alternative) Fly.io + Vercel
+
 100% free for low traffic. Backend + worker on **Fly.io** ($5/mo free credit),
 frontend on **Vercel** (free), Postgres on **Neon** (free), Redis on
 **Upstash** (free). Auto-deploys on every push to `main`.

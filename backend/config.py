@@ -169,7 +169,32 @@ class Settings(BaseSettings):
     @field_validator("DATABASE_URL")
     @classmethod
     def _normalize_db_url(cls, v: str) -> str:
-        return v
+        """Coerce managed-Postgres URLs to the asyncpg driver.
+
+        Render / Neon / Heroku-style providers hand out ``postgresql://``
+        (or the legacy ``postgres://``) connection strings, but the async
+        SQLAlchemy engine requires the ``postgresql+asyncpg://`` driver.
+        Normalise here so a raw provider URL works without manual editing.
+        Also strips ``?sslmode=...`` query params that libpq understands
+        but asyncpg rejects (asyncpg negotiates TLS automatically on these
+        managed endpoints). SQLite / already-async URLs pass through.
+        """
+        if not isinstance(v, str) or not v:
+            return v
+        url = v.strip()
+        if url.startswith("postgres://"):
+            url = "postgresql+asyncpg://" + url[len("postgres://"):]
+        elif url.startswith("postgresql://"):
+            url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+        # asyncpg does not accept the libpq ``sslmode`` query parameter.
+        if "+asyncpg://" in url and "sslmode=" in url:
+            base, _, query = url.partition("?")
+            kept = [
+                kv for kv in query.split("&")
+                if kv and not kv.lower().startswith("sslmode=")
+            ]
+            url = base + (("?" + "&".join(kept)) if kept else "")
+        return url
 
     # ── derived helpers ────────────────────────
     @property

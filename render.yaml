@@ -1,0 +1,106 @@
+# Render Blueprint — one-click free deploy of the whole NEXUS stack.
+#
+# Provisions:
+#   • nexus-backend  — Docker web service running uvicorn + Celery worker
+#                      (free plan; spins down after ~15 min idle, cold-starts
+#                      on the next request).
+#   • nexus-frontend — static Vite build (free; no spin-down).
+#   • nexus-db       — managed Postgres (free).
+#   • nexus-redis    — managed Key Value / Redis (free).
+#
+# Usage:
+#   1. Push this file (done).
+#   2. Render dashboard → New → Blueprint → pick the repo → Apply.
+#   3. Fill the `sync: false` secrets when prompted (values are NOT in git).
+#
+# Secrets to paste (generated for you — see DEPLOY.md § Render fast path):
+#   SECRET_KEY, NEXUS_API_KEY, GROQ_API_KEY, NVIDIA_NIM_API_KEY,
+#   SAMBANOVA_API_KEY, ANTHROPIC_API_KEY (optional), TAVILY_API_KEY (optional),
+#   SERPER_API_KEY (optional)
+# Plus the cross-service URLs (set AFTER first deploy gives you the hostnames):
+#   backend  FRONTEND_URL   = https://nexus-frontend.onrender.com
+#   frontend VITE_BACKEND_URL = https://nexus-backend.onrender.com
+#   frontend VITE_NEXUS_KEY   = (same value as backend NEXUS_API_KEY)
+
+databases:
+  - name: nexus-db
+    plan: free
+    databaseName: nexus
+    user: nexus
+
+services:
+  # ── Redis / Key Value ────────────────────────────────────────────────
+  - type: keyvalue
+    name: nexus-redis
+    plan: free
+    ipAllowList: []          # internal-only access
+
+  # ── Backend + Celery worker (single free web service) ────────────────
+  - type: web
+    name: nexus-backend
+    runtime: docker
+    plan: free
+    region: oregon           # change to your nearest: oregon | frankfurt | singapore
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/health
+    # Override the image CMD: run worker + web together (see start-render.sh).
+    dockerCommand: bash start-render.sh
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: LOG_LEVEL
+        value: INFO
+      - key: BROWSER_ENABLED
+        value: "false"
+      - key: AI_PROVIDER_CHAIN
+        value: groq,nvidia_nim,sambanova
+      - key: DATABASE_URL
+        fromDatabase:
+          name: nexus-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: nexus-redis
+          property: connectionString
+      # ── secrets (paste in dashboard; never in git) ──
+      - key: SECRET_KEY
+        sync: false
+      - key: NEXUS_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: NVIDIA_NIM_API_KEY
+        sync: false
+      - key: SAMBANOVA_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: SERPER_API_KEY
+        sync: false
+      # ── set after the frontend URL is known ──
+      - key: FRONTEND_URL
+        sync: false
+
+  # ── Frontend (static Vite build) ─────────────────────────────────────
+  - type: web
+    name: nexus-frontend
+    runtime: static
+    buildCommand: cd frontend && npm ci && npm run build
+    staticPublishPath: ./frontend/dist
+    autoDeploy: true
+    envVars:
+      - key: VITE_BACKEND_URL
+        sync: false          # = https://nexus-backend.onrender.com
+      - key: VITE_NEXUS_KEY
+        sync: false          # = same value as backend NEXUS_API_KEY
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
