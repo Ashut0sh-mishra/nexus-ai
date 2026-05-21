@@ -56,13 +56,17 @@ def _run_to_dict(run: AgentRun, steps: list[AgentStep]) -> dict[str, Any]:
 
 
 @router.get("/runs/by-task/{task_id}")
-async def get_run_by_task(task_id: str) -> dict[str, Any]:
+async def get_run_by_task(task_id: str) -> dict[str, Any] | None:
     """Return the most recent AgentRun (with all steps) for a task.
 
-    Returns 404 when no AgentRun has been opened for the task. The
-    pipeline-trail observer only opens a run when
-    ``NEXUS_RUNTIME_DRIVES_GENERATE`` is enabled, so the absence of a
-    run is a normal, not-found condition (not an error).
+    Returns ``200 null`` when no AgentRun has been opened for the task.
+    The pipeline-trail observer only opens a run when
+    ``NEXUS_RUNTIME_DRIVES_GENERATE`` is enabled (the default deploy uses
+    inline generation, which opens none), so the absence of a run is a
+    normal condition. We return ``null`` rather than 404 so the optional
+    "watch it think" timeline panel silently renders nothing without a
+    browser-console 404. The frontend already treats a falsy body as
+    "no run".
     """
     async with SessionLocal() as db:
         res = await db.execute(
@@ -73,7 +77,7 @@ async def get_run_by_task(task_id: str) -> dict[str, Any]:
         )
         run = res.scalar_one_or_none()
         if run is None:
-            raise HTTPException(status_code=404, detail="No agent run for task")
+            return None
         steps_res = await db.execute(
             select(AgentStep)
             .where(AgentStep.run_id == run.id)

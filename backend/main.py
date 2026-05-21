@@ -88,6 +88,17 @@ app.add_middleware(
 app.add_middleware(SecurityMiddleware)
 app.add_middleware(RequestContextMiddleware)
 
+# Ensure the export MIME types are known so StaticFiles serves PPTX/PDF with
+# the correct Content-Type (python's mimetypes doesn't know .pptx on every
+# platform — without this it falls back to text/plain).
+import mimetypes  # noqa: E402
+
+mimetypes.add_type(
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".pptx",
+)
+mimetypes.add_type("application/pdf", ".pdf")
+
 # Static files for local-storage exports (used when R2 is not configured).
 # Mount under /api/files so the Vite dev proxy (/api) forwards download links.
 settings.EXPORT_DIR.mkdir(parents=True, exist_ok=True)
