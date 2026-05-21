@@ -2,13 +2,35 @@
 
 Production-grade AI slide generator — same stack as Manus AI.
 
+## 🚀 Live
+
+| | URL |
+| --- | --- |
+| **Frontend (app)** | https://nexus-ai-alpha-jade.vercel.app |
+| **Backend (API)** | https://ashu010-nexus-ai.hf.space |
+| **API health** | https://ashu010-nexus-ai.hf.space/api/health |
+
+- **Frontend** is hosted on **Vercel** (static Vite build).
+- **Backend** runs on a **Hugging Face Space** (Docker: FastAPI + in-process
+  Celery + Redis + SQLite). See [`DEPLOY.md`](DEPLOY.md) for the full free-tier
+  deploy guide, plus [`render.yaml`](render.yaml) / [`fly.toml`](fly.toml) for
+  alternative hosts.
+
+> The free Hugging Face Space sleeps when idle, so the first request may
+> cold-start (~30s). Generated decks live in ephemeral storage — set a free
+> Neon Postgres `DATABASE_URL` for persistence.
+
+---
+
+## Stack
+
 - **Frontend** — React 18 + Vite + Tailwind (Manus-style dark UI)
 - **Backend** — FastAPI + Celery + PostgreSQL + Redis
-- **AI** — Claude `claude-sonnet-4-6` (prod) / `claude-opus-4-7` (dev)
+- **AI** — multi-provider chain (Groq / NVIDIA NIM / SambaNova; Anthropic/OpenAI optional)
 - **Search** — Tavily (primary) + Serper (fallback)
 - **Browser** — Playwright (Chromium, opt-in via `BROWSER_ENABLED=true`)
 - **Storage** — Cloudflare R2 (with local fallback)
-- **Auth** — JWT + Google OAuth
+- **Auth** — JWT + Google OAuth; shared-key + per-IP rate-limit lock-down for public deploys
 
 ---
 
