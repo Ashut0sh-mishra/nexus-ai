@@ -33,6 +33,16 @@ fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# Create the Space if it doesn't exist yet (idempotent — HF returns 409 if
+# it already exists, which we ignore). SDK=docker so HF builds our Dockerfile.
+echo "push-to-hf: ensuring Space ${HF_USER}/${HF_SPACE} exists ..."
+create_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+  "https://huggingface.co/api/repos/create" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"type\":\"space\",\"name\":\"${HF_SPACE}\",\"sdk\":\"docker\",\"private\":false}" 2>/dev/null || echo "000")
+echo "push-to-hf: create-space HTTP ${create_code} (200/201 created, 409 already exists)"
+
 echo "push-to-hf: cloning Space ${HF_USER}/${HF_SPACE} ..."
 git -c credential.helper= \
     -c "credential.helper=!f() { echo username=${HF_USER}; echo password=${TOKEN}; }; f" \
