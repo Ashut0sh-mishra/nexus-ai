@@ -25,7 +25,7 @@ primary_region = "iad"   # change to your closest region (e.g. "sin", "lhr", "fr
 # both onto their own machines. Override the entrypoint per-process.
 [processes]
   app    = "uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1"
-  worker = "celery -A workers.celery_app.celery worker --loglevel=info --concurrency=2"
+  worker = "celery -A workers.celery_app.celery_app worker --loglevel=info --concurrency=2"
 
 [http_service]
   internal_port = 8000

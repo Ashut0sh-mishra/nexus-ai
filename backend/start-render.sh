@@ -14,7 +14,7 @@ set -euo pipefail
 alembic upgrade head 2>/dev/null || echo "start-render: alembic skipped/failed (continuing)"
 
 # Background Celery worker. concurrency=1 keeps RAM under the 512MB free cap.
-celery -A workers.celery_app.celery worker --loglevel=info --concurrency=1 &
+celery -A workers.celery_app.celery_app worker --loglevel=info --concurrency=1 &
 
 # Foreground web server. Render injects $PORT.
 exec uvicorn main:app --host 0.0.0.0 --port "${PORT:-8000}" --workers 1

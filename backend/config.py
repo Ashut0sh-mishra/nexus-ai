@@ -13,6 +13,17 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Phase 6AM — if NEXUS_SECRETS_KEY is set and backend/.env.enc exists,
+# decrypt the committed encrypted secrets into os.environ BEFORE Settings
+# reads the environment. No-op when the key is absent (local dev / CI).
+# Import-safe and total: failures fall back to normal env/.env loading.
+try:  # pragma: no cover - exercised at runtime / in dedicated tests
+    from secrets_loader import load_encrypted_env
+
+    load_encrypted_env()
+except Exception:  # never let secret loading break import
+    pass
+
 
 BACKEND_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BACKEND_DIR.parent

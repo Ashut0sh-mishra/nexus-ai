@@ -35,6 +35,9 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 authlib==1.3.2
 itsdangerous==2.2.0
+# Phase 6AM — explicit pin for the encrypted-secrets loader (Fernet).
+# Previously only transitive via python-jose[cryptography].
+cryptography>=42,<47
 
 # ── exports / files ───────────────────────────
 python-pptx==0.6.23

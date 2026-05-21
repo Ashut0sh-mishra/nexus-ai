@@ -1,6 +1,78 @@
 # NEXUS — Free Production Deploy Guide
 
-Two free paths:
+## ⭐ Chosen path: Hugging Face Spaces (backend) + Vercel (frontend)
+
+Same setup as agri-analyze: a GitHub Action pushes the backend to a HF Space
+on every push to `main`; the frontend deploys to Vercel. **Validated locally** —
+the HF container (Redis + Celery + uvicorn + SQLite, port 7860) boots green and
+the security gate works (health 200, generate 403 without key / 202 with key).
+
+### One-time setup (you do this once — ~5 min)
+
+**A. Create the HF Space**
+1. https://huggingface.co/new-space → Owner `ashu010`, Space name **`nexus-ai`**,
+   **SDK: Docker**, visibility your choice → Create.
+2. (It starts empty; the GitHub Action fills it.)
+
+**B. Add your HF token to this repo's GitHub secrets**
+1. Get/confirm your token: https://huggingface.co/settings/tokens (write access).
+   (You already have one — it powers agri-analyze's deploy.)
+2. GitHub → `Ashut0sh-mishra/nexus-ai` → Settings → Secrets and variables →
+   Actions → New repository secret:
+   - Name: `HF_TOKEN`  ·  Value: your HF write token.
+3. Also create a GitHub **Environment** named `production` (Settings →
+   Environments → New) — the workflow references it. No protection rules needed.
+
+**C. Set the Space's runtime secrets** (HF Space → Settings → Repository secrets)
+
+Recommended (one secret unlocks everything via the committed `.env.enc`):
+- `NEXUS_SECRETS_KEY` = your Fernet master key (see § Encrypted secrets below).
+
+…or set each individually instead:
+- `SECRET_KEY`, `NEXUS_API_KEY`, `GROQ_API_KEY`, `NVIDIA_NIM_API_KEY`,
+  `SAMBANOVA_API_KEY`, and `FRONTEND_URL` (your Vercel URL, for CORS).
+- optional: `ANTHROPIC_API_KEY`, `TAVILY_API_KEY`, `SERPER_API_KEY`.
+
+### Deploy
+
+- **Backend:** push to `main` (or run the *Deploy backend to HuggingFace
+  Spaces* workflow manually) → the Action syncs `backend/` into the Space →
+  HF builds the Docker image → live at `https://ashu010-nexus-ai.hf.space`.
+  Verify: `curl https://ashu010-nexus-ai.hf.space/api/health`.
+- **Frontend (Vercel):** import `Ashut0sh-mishra/nexus-ai`, Root Directory
+  `frontend`. Env vars:
+  - `VITE_BACKEND_URL = https://ashu010-nexus-ai.hf.space`
+  - `VITE_NEXUS_KEY = ` (same value as the backend's `NEXUS_API_KEY`)
+  Deploy → `https://<app>.vercel.app`. Then set the Space secret
+  `FRONTEND_URL` to that Vercel URL and restart the Space (CORS).
+
+### Encrypted secrets (the "encrypt everything" part)
+
+All keys can live in the repo **encrypted** — only the master key is a host
+secret. From `backend/`:
+
+```bash
+python -m scripts.secrets_crypt keygen                 # -> MASTER_KEY (save it)
+# put your rotated keys in backend/.env, then:
+python -m scripts.secrets_crypt encrypt --key MASTER_KEY   # -> backend/.env.enc
+git add backend/.env.enc && git commit -m "add encrypted secrets" && git push
+```
+
+Then set `NEXUS_SECRETS_KEY=MASTER_KEY` as the only Space secret. On boot,
+`secrets_loader` decrypts `.env.enc` into the environment (Fernet / AES). A
+host env var always wins over the file, so you can still override any single
+value from the Space dashboard. Wrong key → fails closed, no plaintext leak.
+
+### HF free-tier caveats
+- SQLite storage is **ephemeral** — decks reset when the Space rebuilds/sleeps.
+  Fine for a demo; for persistence point `DATABASE_URL` at a free Neon Postgres.
+- Spaces sleep after inactivity → first request cold-starts.
+
+---
+
+## Other free paths
+
+Two more options if you'd rather not use HF:
 
 - **Render Blueprint (FASTEST — recommended, ~5 min, no CLI)** — one repo
   connect provisions backend+worker, frontend, Postgres, and Redis from the

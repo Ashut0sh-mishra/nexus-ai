@@ -1,0 +1,64 @@
+# Hugging Face Spaces (Docker SDK) — NEXUS backend.
+# Single self-contained container: Redis + Celery worker + FastAPI/uvicorn,
+# SQLite for persistence. Mirrors the agri-analyze HF deploy pattern
+# (non-root uid 1000, port 7860).
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# System deps: redis-server (local broker), weasyprint + python-pptx fonts.
+# NOTE: no Playwright/Chromium here — BROWSER_ENABLED=false on HF, so we skip
+# the heavy browser download to keep the image lean and the build fast.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      redis-server \
+      libpq-dev \
+      libcairo2 \
+      libpango-1.0-0 \
+      libpangoft2-1.0-0 \
+      libgdk-pixbuf-2.0-0 \
+      libffi-dev \
+      shared-mime-info \
+      fonts-liberation \
+      fonts-dejavu-core \
+      curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# HF Spaces requires a non-root user with uid 1000.
+RUN useradd -m -u 1000 user
+USER user
+ENV PATH="/home/user/.local/bin:$PATH"
+
+WORKDIR /app
+
+# Python deps (the deploy workflow copies backend/* to the Space root, so
+# requirements.txt sits at ./). aiosqlite is added explicitly: the HF Space
+# uses SQLite (no managed Postgres on HF), and aiosqlite is otherwise only a
+# test-time dependency.
+COPY --chown=user requirements.txt ./
+RUN pip install --upgrade pip \
+ && pip install -r requirements.txt \
+ && pip install "aiosqlite==0.20.0"
+
+# Project code (already at Space root via the deploy workflow).
+COPY --chown=user . .
+
+# HF Spaces inject secrets as env vars (set NEXUS_SECRETS_KEY in the Space
+# settings; the committed .env.enc decrypts at boot via secrets_loader).
+# Sensible production defaults; anything below can be overridden by a Space
+# secret or by the decrypted .env.enc.
+ENV ENVIRONMENT=production \
+    DEBUG=false \
+    LOG_LEVEL=INFO \
+    BROWSER_ENABLED=false \
+    PORT=7860 \
+    AI_PROVIDER_CHAIN=groq,nvidia_nim,sambanova \
+    DATABASE_URL=sqlite+aiosqlite:///./nexus.db \
+    REDIS_URL=redis://localhost:6379/0
+
+EXPOSE 7860
+
+# start-hf.sh is copied to the Space root by the deploy workflow.
+CMD ["bash", "start-hf.sh"]

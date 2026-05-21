@@ -1,0 +1,68 @@
+name: Deploy backend to HuggingFace Spaces
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'deploy/Dockerfile.hf'
+      - 'deploy/start-hf.sh'
+      - 'deploy/hf-readme.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-hf
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.repository == 'Ashut0sh-mishra/nexus-ai'
+    environment: production
+    steps:
+      - name: Checkout GitHub repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push backend to HuggingFace Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_USER: ashu010
+          HF_SPACE: nexus-ai
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global credential.helper "!f() { echo username=${HF_USER}; echo password=${HF_TOKEN}; }; f"
+
+          GH_DIR=$(pwd)
+
+          # Clone the existing HF Space (create it once in the HF dashboard:
+          # New Space -> SDK: Docker -> name: nexus-ai).
+          cd /tmp
+          git clone "https://huggingface.co/spaces/${HF_USER}/${HF_SPACE}" hf-space
+          cd hf-space
+
+          # Wipe everything except git metadata so removed files propagate.
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+
+          # Copy the backend tree to the Space root.
+          cp -r "$GH_DIR/backend/." ./
+
+          # Swap in the HF-specific Dockerfile + README + start script
+          # (HF needs the Dockerfile + README at the Space root).
+          cp "$GH_DIR/deploy/Dockerfile.hf" Dockerfile
+          cp "$GH_DIR/deploy/hf-readme.md" README.md
+          cp "$GH_DIR/deploy/start-hf.sh" start-hf.sh
+
+          # Never ship a plaintext .env to the Space (only the encrypted
+          # .env.enc, if present, travels — it is safe).
+          rm -f .env
+
+          git add -A
+          git commit -m "deploy: sync backend from GH $(git -C "$GH_DIR" log -1 --format=%h main)" --allow-empty
+          git push origin main
