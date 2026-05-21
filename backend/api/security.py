@@ -135,8 +135,16 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         if method == "OPTIONS":
             return await call_next(request)
 
-        # 1) API-key gate (skipped when the key is unset = local dev).
-        if settings.NEXUS_API_KEY and not _is_public_path(path):
+        # The entire lock-down (key gate + rate limit) is one unit that only
+        # activates when NEXUS_API_KEY is configured. Local dev and CI leave
+        # it empty, so the middleware is a complete no-op there — no key
+        # check, no rate limit. Production sets the secret and both
+        # protections turn on together.
+        if not settings.NEXUS_API_KEY:
+            return await call_next(request)
+
+        # 1) API-key gate (public paths bypass the key check).
+        if not _is_public_path(path):
             supplied = request.headers.get("x-nexus-key", "")
             if supplied != settings.NEXUS_API_KEY:
                 logger.warning(
