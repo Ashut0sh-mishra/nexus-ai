@@ -57,3 +57,7 @@ manus-need.zip
 # deploy tokens (never commit)
 .hf_token
 *.token
+
+# Reference material — not part of the project source.
+manus-reference/
+manus-need/
