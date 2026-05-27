@@ -205,6 +205,7 @@ class NexusAgentLoop:
             search_queries: list[str] = [topic]
             try:
                 from agent.topic_expander import expand_topic, canonicalize_topic
+                from agent.query_builder import build_smart_queries
 
                 expanded, exp_tokens, exp_cost = await expand_topic(
                     topic, ai_call=self._ai_call, max_queries=5
@@ -213,6 +214,14 @@ class NexusAgentLoop:
                     search_queries = expanded
                 total_tokens += exp_tokens
                 total_cost += exp_cost
+
+                # FIX 3: Override with time-aware queries for historical topics
+                if search_queries:
+                    smart_queries = build_smart_queries(topic, search_queries[0])
+                    if len(smart_queries) > 1:
+                        search_queries = smart_queries
+                        logger.info(f"loop.smart_queries_applied topic={topic[:60]} count={len(smart_queries)}")
+
                 # Replace the topic the rest of the pipeline sees with
                 # the canonicalized form so meta-verbs ("create ppt on")
                 # don't leak into the planner / writer / image prompts.
@@ -344,6 +353,22 @@ class NexusAgentLoop:
                     logger.warning("loop.search_failed", extra={"err": str(exc)})
                     research = ""
             memory.write_research(research)
+
+            # FIX 2: Extract structured facts from research (dates, numbers, names)
+            # so LLM has concrete anchor points instead of inventing data.
+            facts_hint = ""
+            logger.info(f"loop.research_length_before_facts research_len={len(research) if research else 0}")
+            if research and len(research) > 50:
+                try:
+                    from agent.fact_extractor import extract_facts_fast, format_facts_for_prompt
+                    facts = extract_facts_fast(research)
+                    memory.write_artifact("facts.json", facts)
+                    facts_hint = format_facts_for_prompt(facts)
+                    logger.info(f"loop.facts_extracted dates={len(facts.get('dates', []))} numbers={len(facts.get('numbers', []))} names={len(facts.get('names', []))}")
+                    if facts_hint:
+                        logger.info(f"loop.facts_hint_ready hint_len={len(facts_hint)}")
+                except Exception as exc:
+                    logger.warning(f"loop.fact_extraction_failed err={str(exc)}", exc_info=True)
 
             # Emit per-source events so the frontend can show live source cards.
             for src in research_sources[:8]:
@@ -497,6 +522,7 @@ class NexusAgentLoop:
                     key_facts=key_facts,
                     slide_count=slide_count,
                     ai_call=self._ai_call,
+                    facts_hint=facts_hint,
                 )
                 total_tokens += n_tokens
                 total_cost += n_cost
@@ -750,6 +776,23 @@ class NexusAgentLoop:
                 slides = repair_for_validator(slides)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("loop.deck_repair_failed", extra={"err": str(exc)})
+
+            # Phase 6AX: content quality validation — remove or convert
+            # slides with hallucinated data, generic filler, or low quality.
+            # Runs AFTER repair (so schema is valid) but BEFORE editorial
+            # passes (so we don't waste effort polishing junk).
+            try:
+                from agent.content_validator import clean_slides_for_quality
+                pre_quality_count = len(slides)
+                slides = clean_slides_for_quality(slides, research)
+                post_quality_count = len(slides)
+                if post_quality_count < pre_quality_count:
+                    logger.info(
+                        "quality.slides_removed",
+                        extra={"removed": pre_quality_count - post_quality_count}
+                    )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("loop.quality_validation_failed", extra={"err": str(exc)})
 
             # Phase 6AJ: deterministic editorial polish.
             # Strengthens titles, drops hedging openers / generic phrases
@@ -1100,6 +1143,30 @@ class NexusAgentLoop:
                 if not re.search(r"\d", val):
                     return True
 
+        # Chart slide: CRITICAL — flag if values look fabricated (too perfect)
+        if layout == "chart":
+            chart_data = slide.get("chart_data") or {}
+            values = chart_data.get("values") or []
+            if isinstance(values, list) and len(values) >= 3:
+                # Check for perfect linear progression (10, 20, 30) or (1, 1.2, 1.5, 1.8)
+                diffs = [round(values[i+1] - values[i], 4) for i in range(len(values)-1)]
+                if len(set(diffs)) == 1 and diffs[0] != 0:
+                    # Perfect linear spacing = fabricated
+                    return True
+                # Check for too-round numbers (all multiples of 5 or 10)
+                if all(v % 10 == 0 for v in values if isinstance(v, (int, float))):
+                    # All multiples of 10 = suspicious
+                    return True
+                # Check for suspiciously smooth progression (variance too low)
+                if len(values) >= 4:
+                    import statistics
+                    try:
+                        # If coefficient of variation of diffs < 0.1, it's too uniform
+                        if statistics.stdev(diffs) / abs(statistics.mean(diffs)) < 0.1:
+                            return True
+                    except (statistics.StatisticsError, ZeroDivisionError):
+                        pass
+
         # Bullets/two-col: weak if NO bullet/body has any digit, year, or proper noun.
         if layout in ("bullets", "two-col"):
             joined = " ".join(chunks[1:])  # exclude title
@@ -1275,15 +1342,22 @@ class NexusAgentLoop:
                 f"Slides needing a cinematic image:\n{indexed}\n\n"
                 f"You are an art director briefing a documentary photographer.\n"
                 f"For EACH slide, write ONE concrete visual brief (max 22 words) "
-                f"specifying a SUBJECT, a LIGHTING condition, and a CAMERA framing.\n\n"
+                f"specifying a SPECIFIC SUBJECT, LIGHTING condition, and CAMERA framing.\n\n"
+                f"CRITICAL RULES:\n"
+                f"1. VARY every image — different subjects, angles, times of day, locations\n"
+                f"2. Make each image CONCRETE: name real objects, specific places, exact times\n"
+                f"3. NEVER repeat 'desk' or 'office' or 'screen' more than ONCE\n"
+                f"4. Mix scales: close-ups, wide shots, aerials, details\n"
+                f"5. Mix settings: indoor/outdoor, urban/natural, day/night\n\n"
                 f"Examples of GOOD briefs:\n"
-                f"- 'rain-slicked harbor at dawn, fishermen pulling nets, long lens, side light'\n"
-                f"- 'half-empty warehouse with single forklift, fluorescent overhead, wide angle, deep shadow'\n"
-                f"- 'analyst's desk at night, blue monitor glow on face, 50mm portrait, shallow focus'\n\n"
-                f"DO NOT use words like: calming, serene, vibrant, modern, professional, "
-                f"abstract, beautiful, stunning, background. No stock-photo cliches "
-                f"(handshakes, lightbulbs, arrows pointing up, team meetings).\n"
-                f"DO use specific subjects, real places, named lighting, real lens choices.\n\n"
+                f"- 'cargo ship at sunset, containers stacked high, telephoto from dock, orange backlight'\n"
+                f"- 'empty subway platform 3am, single fluorescent tube, 24mm wide, harsh overhead'\n"
+                f"- 'rooftop solar panels in snow, close-up of ice crystals, macro, dawn sidelight'\n"
+                f"- 'server room aisle, blue LED rows, 50mm, cool backlight, shallow depth'\n"
+                f"- 'highway at dusk, brake lights streaking, long exposure, elevated angle'\n\n"
+                f"BANNED words: professional, modern, abstract, calming, vibrant, stunning, beautiful, \n"
+                f"background, concept, handshake, lightbulb, arrow, meeting, teamwork.\n\n"
+                f"BANNED repetition: If you already wrote 'desk' or 'office', find something ELSE.\n\n"
                 f"Return ONLY a JSON array of strings in slide order. No prose."
             )
             text, tokens, cost = await self._ai_call(

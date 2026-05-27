@@ -53,13 +53,30 @@ def _repair_title(slide: dict[str, Any]) -> bool:
 
 def _repair_closing(slide: dict[str, Any]) -> bool:
     changed = False
+    # FIX: Empty title bug - LLM often returns empty title for closing slides
+    title = slide.get("title", "")
+    if not isinstance(title, str) or not title.strip():
+        slide["title"] = "Thank You"
+        changed = True
     changed |= _ensure_str(slide, "subtitle", "")
     changed |= _ensure_str(slide, "cta", "Thank you")
     return changed
 
 
 def _repair_quote(slide: dict[str, Any]) -> bool:
-    return _ensure_str(slide, "attribution", "")
+    changed = False
+    # FIX: Empty title bug - LLM often returns empty title for quote slides
+    title = slide.get("title", "")
+    if not isinstance(title, str) or not title.strip():
+        # Use first 50 chars of quote text as fallback title
+        quote_text = slide.get("text", "")
+        if quote_text and isinstance(quote_text, str) and quote_text.strip():
+            slide["title"] = quote_text[:50].strip() + ("..." if len(quote_text) > 50 else "")
+        else:
+            slide["title"] = "Key Insight"
+        changed = True
+    changed |= _ensure_str(slide, "attribution", "")
+    return changed
 
 
 def _repair_chart(slide: dict[str, Any]) -> bool:
@@ -89,9 +106,21 @@ def _repair_bigstat(slide: dict[str, Any]) -> bool:
 
 
 def _repair_section_divider(slide: dict[str, Any]) -> bool:
-    """Phase 6AA — seed section_divider optional keys."""
+    """Phase 6AA — seed section_divider optional keys.
+
+    Section dividers with empty subtitles appear nearly blank in the UI.
+    When subtitle is missing/empty, convert the layout to 'bullets' with
+    a minimal list so the slide has visible content instead of appearing
+    as a blank page.
+    """
     changed = _ensure_str(slide, "eyebrow", "")
-    changed |= _ensure_str(slide, "subtitle", "")
+    # If subtitle is missing or empty, convert to bullets layout
+    subtitle = slide.get("subtitle", "")
+    if not isinstance(subtitle, str) or not subtitle.strip():
+        # Convert section_divider with no subtitle → bullets
+        slide["layout"] = "bullets"
+        slide["bullets"] = [slide.get("title", "Section break")]
+        changed = True
     return changed
 
 
@@ -132,6 +161,9 @@ def repair_for_validator(slides: Any) -> list[dict[str, Any]]:
     cache the input list are not surprised). Slides that are not dicts
     are passed through unchanged. The function never invents content
     fields (bullets, columns, stats, chart values).
+
+    Phase 6AX: Also converts low-quality layouts (bigstat with generic stats,
+    section_divider with no subtitle) to content-rich alternatives.
     """
 
     if not isinstance(slides, list):
@@ -143,14 +175,34 @@ def repair_for_validator(slides: Any) -> list[dict[str, Any]]:
             out.append(raw)  # preserved verbatim; validator will flag it
             continue
         slide = dict(raw)
-        # Ensure every slide has a string title; the validator rejects
-        # missing/empty titles and most layouts share that requirement.
-        if not isinstance(slide.get("title"), str) or not slide["title"].strip():
-            slide["title"] = str(slide.get("title") or "Slide").strip() or "Slide"
         layout = slide.get("layout")
+
+        # Phase 6AX: Convert bigstat slides to bullets (bigstat often looks empty)
+        if layout == "bigstat":
+            title = slide.get("title", "")
+            value = slide.get("value", "")
+            label = slide.get("label", "")
+            # Convert to bullets with the stat as first bullet
+            slide["layout"] = "bullets"
+            bullets = []
+            if value and label:
+                bullets.append(f"{value} — {label}")
+            elif value:
+                bullets.append(str(value))
+            if title and title not in bullets:
+                bullets.insert(0, title)
+            slide["bullets"] = bullets if bullets else [title or "Key insight"]
+            # Remove bigstat-specific fields
+            slide.pop("value", None)
+            slide.pop("label", None)
+            slide.pop("is_hero", None)
+
         repairer = _LAYOUT_REPAIRERS.get(str(layout) if isinstance(layout, str) else "")
         if repairer is not None:
             repairer(slide)
+        # Generic fallback for layouts without specific title repair logic
+        if not isinstance(slide.get("title"), str) or not slide["title"].strip():
+            slide["title"] = str(slide.get("title") or "Slide").strip() or "Slide"
         out.append(slide)
     return out
 

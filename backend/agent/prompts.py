@@ -106,39 +106,85 @@ no code fences. Just the raw JSON array.
 
 Each slide MUST have a "layout" field. Available layouts:
 
-- "title":   {{"layout":"title","title":"...","subtitle":"...","eyebrow":"..."}}
-- "bullets": {{"layout":"bullets","title":"...","bullets":["...","...","...","..."]}}
-- "two-col": {{"layout":"two-col","title":"...","columns":[
-                 {{"heading":"...","body":"..."}},
-                 {{"heading":"...","body":"..."}}]}}
-- "quote":   {{"layout":"quote","quote":"...","attribution":"..."}}
-- "stats":   {{"layout":"stats","title":"...","stats":[
-                 {{"value":"42%","label":"..."}},
-                 {{"value":"$1.2B","label":"..."}},
-                 {{"value":"3x","label":"..."}}]}}
-- "chart":   {{"layout":"chart","title":"...","subtitle":"...",
-                 "chart_type":"bar|line|doughnut",
-                 "chart_data":{{
-                   "labels":["2023","2025","2027","2030"],
-                   "values":[1200,1800,2600,3500],
-                   "unit":"GW","source":"IEA 2024"}}}}
-- "closing": {{"layout":"closing","title":"...","subtitle":"...","cta":"..."}}
+- "title":      {{"layout":"title","title":"...","subtitle":"...","eyebrow":"..."}}
+- "bullets":    {{"layout":"bullets","title":"...","bullets":["Fact 1","Fact 2","Fact 3"]}}
+                 IMPORTANT: MAX 3 bullets per slide, each ≤ 8 words, NO full sentences
+                 GOOD: "$69K peak Nov 2021" BAD: "The price reached a peak value of $69,000"
+- "two-col":    {{"layout":"two-col","title":"...","columns":[
+                   {{"heading":"...","body":"..."}},
+                   {{"heading":"...","body":"..."}}]}}
+                 Keep body text SHORT (≤ 20 words per column)
+- "quote":      {{"layout":"quote","title":"...","quote":"...","attribution":"Person Name"}}
+- "stats":      {{"layout":"stats","title":"...","stats":[
+                   {{"value":"42%","label":"Short context"}},
+                   {{"value":"$1.2B","label":"Short context"}},
+                   {{"value":"3x","label":"Short context"}}]}}
+                 USE THIS OFTEN! Stats slides are visually powerful. Prefer stats over bullets when you have numbers.
+- "chart":      {{"layout":"chart","title":"...","subtitle":"...",
+                   "chart_type":"bar|line|doughnut",
+                   "chart_data":{{
+                     "labels":["2023","2025","2027","2030"],
+                     "values":[1200,1800,2600,3500],
+                     "unit":"GW","source":"IEA 2024"}}}}
+- "timeline":   {{"layout":"timeline","title":"...","subtitle":"...","events":[
+                   {{"date":"2020","label":"Event description"}},
+                   {{"date":"2022","label":"Another event"}},
+                   {{"date":"2024","label":"Most recent event"}}]}}
+- "comparison": {{"layout":"comparison","title":"...","subtitle":"...","left":{{"heading":"Option A","body":"..."}},
+                   "right":{{"heading":"Option B","body":"..."}}}}
+- "closing":    {{"layout":"closing","title":"...","subtitle":"...","cta":"..."}}
 
-Hard rules:
-- Slide 1: layout MUST be "title". Slide N: layout MUST be "closing".
-- Middle slides: mix ALL layout types. Never use the same layout more than \
-twice in a row.
-- Include AT LEAST ONE "chart" whenever the topic has trends, growth, market \
-sizes, time series, or comparisons.
-- bullets: at most 4 per slide, each ≤ 12 words.
-- stats: exactly 3 items with REAL concrete numbers and units.
-- DATA MUST BE REAL. Cite actual sources (IEA, IMF, World Bank, IPCC, \
-McKinsey, Gartner, Statista, peer-reviewed papers, official government data).
-- chart_data.values: plain numbers only — no $, %, commas. Unit in \
-"chart_data.unit".
-- title.eyebrow: a specific category or context — NOT just "Presentation".
-- closing.cta: a specific action or question — NOT "Thank you".
-- Every slide earns its place. No filler, no summaries of summaries.
+VISUAL VARIETY - Mark 1-2 slides as "hero" for dramatic full-screen treatment:
+- Add "is_hero": true to make slide FULL-SCREEN with big image background
+- Use sparingly: opening slide, 1 key insight slide, maybe closing
+- Hero slides have MINIMAL text, MAXIMUM visual impact
+
+CRITICAL RULES - NEVER VIOLATE:
+
+1. DATA AUTHENTICITY:
+   - ONLY use numbers that appear EXACTLY in the research findings.
+   - If research lacks data for a chart, use "bullets" or "two-col" instead.
+   - NEVER estimate, interpolate, or make up numbers.
+   - Chart values MUST match research sources WORD FOR WORD.
+   - When unsure about a number, DO NOT include it.
+   - Chart types: "line" for trends/time-series, "bar" for comparisons, "doughnut" for percentages/parts-of-whole
+
+2. LAYOUT DISCIPLINE:
+   - Slide 1 MUST be "title". Last slide MUST be "closing".
+   - NEVER use "bigstat" or "section_divider" — they create empty-looking slides.
+   - PREFER data-rich layouts: "stats" (3 big numbers), "chart" (visual trend), "timeline" (chronology)
+   - Use "bullets" ONLY when you have 2-3 SHORT, PUNCHY facts (not paragraphs!)
+   - Use "two-col" for before/after, pros/cons, or contrasting perspectives
+   - Use "quote" for powerful statements from named people
+   - Mix layouts — never repeat same layout twice in a row.
+   - AVOID bullet-heavy decks: if 3+ slides in a row are bullets, convert some to stats/charts.
+
+3. CONTENT DENSITY & VISUAL RICHNESS:
+   - RULE: Max 6 lines of text per slide. Less text = MORE impact.
+   - Every bullet must reveal something specific: a number, a name, a date, or a fact.
+   - BANNED words: "various", "several", "many", "growing", "innovative", "robust".
+   - titles: State the finding, not the topic. BAD: "Market Overview" GOOD: "Market Hit $2.3B in 2024"
+   - bullets: MAX 3 per slide (not 4!), each ≤ 8 words (not 12!), each contains ONE specific fact.
+   - stats: exactly 3 BIG numbers that tell a story together.
+   - VISUAL PRIORITY: If you can show it with a chart/stat/icon instead of text, DO IT.
+   - ONE IDEA per slide - if you need more ideas, make more slides.
+
+4. VISUAL VARIETY:
+   - eyebrow: Use specific context from research, not generic "Presentation" or "Overview"
+   - closing.cta: Make it specific to the topic, not "Thank you" or "Questions?"
+
+5. QUALITY CHECKS:
+   - Re-read research BEFORE writing each slide.
+   - If a slide repeats what you already said, delete it and write something new.
+   - Every slide must advance understanding — no summaries of summaries.
+   - If you catch yourself writing "As we can see" or "It is important" — DELETE IT.
+
+6. AVOID GENERIC CORPORATE STYLE:
+   - NO generic market graphs unless you have REAL data points
+   - NO "Growth Trajectory" or "Market Opportunity" slides with made-up charts
+   - NO slides that just say "why this matters" without specific evidence
+   - Every chart MUST show actual numbers from research, or DON'T include it
+   - If you don't have data for a chart, use bullets with specific facts instead
 """
 
 
@@ -152,16 +198,32 @@ You are NEXUS Planner. Given a topic and (optionally) research findings, \
 output a structured outline for a slide deck.
 
 Return ONLY a valid JSON array of slide plans. Each item:
-{"index": <int>, "layout": "title|bullets|two-col|quote|stats|chart|closing",
+{"index": <int>, "layout": "title|bullets|two-col|quote|stats|chart|timeline|comparison|closing",
  "title": "<slide title>", "intent": "<one-line description of what this slide proves>"}
+
+CRITICAL LAYOUT RULES:
+- BANNED LAYOUTS: Never use "bigstat" or "section_divider" (they look empty/ugly)
+- Slide 1 MUST be "title". Last slide MUST be "closing".
+- Middle slides: Use "bullets", "two-col", "stats", "chart", "quote", "timeline", "comparison"
+- Choose layout based on CONTENT, not pattern:
+  * "bullets": key points, lists, facts
+  * "two-col": comparisons, before/after, pros/cons
+  * "stats": 3 concrete numbers with context
+  * "chart": time-series data, growth trends (ONLY if research has real numbers)
+  * "quote": direct quote from a named person
+  * "timeline": chronological events with dates
+  * "comparison": side-by-side contrast of two approaches/options
 
 Rules:
 - Exactly N slides where N is provided in the user message.
-- Slide 1 layout = "title". Slide N layout = "closing".
-- Include exactly ONE "chart" slide when the topic has trends, growth, market \
-size, or comparable categories — place it in the middle third.
-- Vary layouts across all middle slides. Never repeat the same layout more \
-than twice consecutively.
+- LAYOUT SELECTION (content-aware, not sequential):
+  * Use "stats" when research has 3+ concrete numbers with units
+  * Use "chart" ONLY if research contains time-series data or growth numbers
+  * Use "quote" if research has a direct quote from a named person
+  * Use "two-col" for comparisons, A vs B, pros/cons, before/after
+  * Use "bullets" for lists, key facts, or when other layouts don't fit
+- AVOID patterns: Never do bullets→two-col→stats→chart→quote in that order.
+- NEVER repeat the same layout more than twice consecutively.
 - Titles are concise theses (max 10 words), not topic labels.
 - The layout_recipe in the deck strategy is the target ordering — follow it.
 """
@@ -297,7 +359,12 @@ Rewrite rules:
 - stats: exactly 3 items; each value is a real number with a unit (%, $, x, M, B).
 - two-col body: 1–2 sentences, each with at least one specific fact.
 - quote: must be from a real named person with their role — no vague attributions.
-- Preserve the EXACT "layout" value. Do not change the slide type.
+- chart: NEVER fabricate data. If the research does not contain the exact numbers
+  for a chart, CHANGE the layout to "bullets" instead and list concrete facts.
+  Perfect linear progressions like [10, 20, 30] or [5, 10, 15, 20] are BANNED.
+  Every chart value MUST appear verbatim in the research text.
+- Preserve the EXACT "layout" value UNLESS the slide is a chart with no data,
+  then change layout to "bullets" and list facts instead.
 """
 
 
